@@ -1,0 +1,102 @@
+{
+	"nameShort": "SenWeaver",
+	"nameLong": "SenWeaver",
+	"SenWeaverVersion": "1.0.5",
+	"date": "2026-01-28 16:00:00",
+	"SenWeaverRelease": "001040",
+	"applicationName": "SenWeaver",
+	"dataFolderName": ".SenWeaver-code",
+	"win32MutexName": "SenWeavereditor",
+	"licenseName": "MIT",
+	"licenseUrl": "https://github.com/senweaver/senweaver-ide/blob/main/LICENSE.txt",
+	"serverLicenseUrl": "https://github.com/senweaver/senweaver-ide/blob/main/LICENSE.txt",
+	"serverGreeting": [],
+	"serverLicense": [],
+	"serverLicensePrompt": "",
+	"serverApplicationName": "SenWeaver-server",
+	"serverDataFolderName": ".SenWeaver-server",
+	"tunnelApplicationName": "SenWeaver-tunnel",
+	"win32DirName": "SenWeaver",
+	"win32NameVersion": "SenWeaver",
+	"win32RegValueName": "SenWeaverEditor",
+	"win32x64AppId": "{{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}",
+	"win32arm64AppId": "{{B2C3D4E5-F6A7-8901-BCDE-F12345678901}",
+	"win32x64UserAppId": "{{C3D4E5F6-A7B8-9012-CDEF-123456789012}",
+	"win32arm64UserAppId": "{{D4E5F6A7-B8C9-0123-DEF0-234567890123}",
+	"win32AppUserModelId": "SenWeaver.Editor",
+	"win32ShellNameShort": "SenWeaver",
+	"win32TunnelServiceMutex": "SenWeaver-tunnelservice",
+	"win32TunnelMutex": "SenWeaver-tunnel",
+	"darwinBundleIdentifier": "code.SenWeavereditor.com",
+	"linuxIconName": "SenWeaver-editor",
+	"licenseFileName": "LICENSE.txt",
+	"reportIssueUrl": "https://github.com/senweaver/senweaver-ide/issues/new",
+	"nodejsRepository": "https://nodejs.org",
+	"urlProtocol": "SenWeaver",
+	"extensionsGallery": {
+		"serviceUrl": "https://marketplace.visualstudio.com/_apis/public/gallery",
+		"itemUrl": "https://marketplace.visualstudio.com/items"
+	},
+	"extensionAllowedProposedApi": [],
+	"extensionEnabledApiProposals": {
+		"ms-vscode-remote.remote-containers": ["contribViewsRemote"],
+		"ms-azuretools.vscode-docker": ["contribViewsRemote"]
+	},
+	"extensionKind": {
+		"senweaver.python-environment": ["workspace"]
+	},
+	"extensionSyncedKeys": {},
+	"extensionVirtualWorkspaceSupport": {},
+	"extensionUntrustedWorkspaceSupport": {},
+	"extensionAllowedBadgeProviders": [],
+	"extensionAllowedBadgeProvidersRegex": [],
+	"extensionTips": {},
+	"extensionImportantTips": {},
+	"exeBasedExtensionTips": {},
+	"extensionKeywords": {},
+	"keybindingService.dispatch": "code",
+	"extensionHostDebugParams": [],
+	"extensionTestsLocationPattern": "",
+	"extensionAllowedInsecureContent": [],
+	"extensionAllowedInsecureContentRegex": [],
+	"extensionHostProcess": "extensionHost",
+	"extensionHostProcessWorker": "extensionHostWorker",
+	"extensionHostProcessOptions": {},
+	"extensionHostProcessWorkerOptions": {},
+	"extensionHostProcessDebugOptions": {},
+	"extensionHostProcessWorkerDebugOptions": {},
+	"extensionHostProcessDebugPort": 5870,
+	"extensionHostProcessWorkerDebugPort": 5871,
+	"extensionHostProcessDebugBreakOnStart": false,
+	"extensionHostProcessWorkerDebugBreakOnStart": false,
+	"extensionSignatureVerificationService.enabled": false,
+	"extensionSignatureVerificationService.required": false,
+	"extensionSignatureVerificationService.trustedPublishers": [],
+	"extensionSignatureVerificationService.trustedExtensions": [],
+	"extensionSignatureVerificationService.allowUnsignedExtensions": true,
+	"extensionSignatureVerificationService.skipSignatureVerification": true,
+	"builtInExtensions": [
+		{
+			"name": "ms-ceintl.vscode-language-pack-zh-hans",
+			"version": "1.99.2025041609"
+		},
+		{
+			"name": "detachhead.basedpyright",
+			"version": "1.36.2"
+		},
+		{
+			"name": "vue.volar",
+			"version": "2.0.28"
+		}
+	],
+	"linkProtectionTrustedDomains": [
+		"https://ide.senweaver.com",
+		"https://github.com/senweaver",
+		"https://ollama.com"
+	],
+	"senweaverApiConfig": {
+		"apiBaseUrl": "https://ide-api.senweaver.com",
+		"wsBaseUrl": "wss://ide-api.senweaver.com",
+		"secretKey": "YOUR_SECRET_KEY_HERE"
+	}
+}
