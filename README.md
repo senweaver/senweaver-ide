@@ -77,7 +77,7 @@ AI 驱动的代码安全检测与修复：
   - 识别性能瓶颈和内存泄漏风险
   - 代码复杂度分析和优化建议
 
-### �🔧 多模型支持
+### � 多模型支持
 
 支持主流 AI 模型提供商，灵活切换：
 
@@ -340,21 +340,124 @@ npx gulp vscode-linux-x64-build-rpm
 
 ```
 senweaver-ide/
-├── src/vs/workbench/contrib/senweaver/  # SenWeaver 核心功能
-│   ├── browser/                          # 浏览器端代码
-│   │   ├── chatThreadService.ts          # 对话服务
-│   │   ├── editCodeService.ts            # 代码编辑服务
-│   │   ├── autocompleteService.ts        # 自动补全服务
-│   │   ├── toolsService.ts               # 工具服务
-│   │   └── react/                        # React UI 组件
-│   ├── common/                           # 通用代码
-│   │   ├── senweaverSettingsService.ts   # 设置服务
-│   │   ├── sendLLMMessageService.ts      # LLM 消息服务
-│   │   └── mcpService.ts                 # MCP 协议服务
-│   └── electron-main/                    # 主进程代码
-├── resources/                            # 资源文件
-├── extensions/                           # 内置扩展
-└── product.json                          # 产品配置
+├── src/                                    # 源代码目录
+│   ├── vs/                                 # VS Code 核心
+│   │   ├── base/                           # 基础库（工具函数、UI组件）
+│   │   ├── code/                           # 代码模块
+│   │   ├── editor/                         # Monaco 编辑器核心
+│   │   ├── platform/                       # 平台服务层
+│   │   ├── server/                         # 服务端代码
+│   │   └── workbench/                      # 工作台
+│   │       ├── api/                        # 扩展 API
+│   │       ├── browser/                    # 浏览器端实现
+│   │       ├── services/                   # 服务层
+│   │       └── contrib/                    # 贡献点模块
+│   │           └── senweaver/              # ⭐ SenWeaver AI 核心
+│   │               ├── browser/            # 浏览器端代码
+│   │               │   ├── chatThreadService.ts           # 对话线程服务
+│   │               │   ├── editCodeService.ts             # 代码编辑服务
+│   │               │   ├── autocompleteService.ts         # AI 自动补全
+│   │               │   ├── toolsService.ts                # 工具调用服务
+│   │               │   ├── contextGatheringService.ts     # 上下文收集
+│   │               │   ├── editPredictionService.ts       # 编辑预测
+│   │               │   ├── senweaverSettingsPane.ts       # 设置面板
+│   │               │   ├── senweaverBrowserEditor.ts      # 浏览器编辑器
+│   │               │   ├── senweaverDocumentEditor.ts     # 文档编辑器
+│   │               │   ├── senweaverDesignerPreviewEditor.ts  # 设计预览
+│   │               │   ├── senweaverCommandBarService.ts  # 命令栏服务
+│   │               │   ├── senweaverOnlineConfigContribution.ts  # 在线配置
+│   │               │   ├── sidebarPane.ts                 # 侧边栏面板
+│   │               │   ├── subagentToolService.ts         # 子代理服务
+│   │               │   ├── terminalToolService.ts         # 终端工具服务
+│   │               │   ├── startWebSearchServer.cjs       # 网页搜索服务
+│   │               │   ├── startFetchUrlServer.cjs        # URL 提取服务
+│   │               │   ├── startDocumentReaderServer.cjs  # 文档读取服务
+│   │               │   ├── startOpenBrowserServer.cjs     # 浏览器自动化
+│   │               │   ├── startScreenshotToCodeServer.cjs # 截图转代码
+│   │               │   ├── startVisionServer.cjs          # 视觉分析服务
+│   │               │   └── react/                         # React UI 组件
+│   │               │       └── src/
+│   │               │           ├── sidebar-tsx/           # 侧边栏组件
+│   │               │           ├── senweaver-settings-tsx/ # 设置界面
+│   │               │           ├── senweaver-editor-widgets-tsx/ # 编辑器小部件
+│   │               │           ├── quick-edit-tsx/        # 快速编辑
+│   │               │           ├── design-canvas/         # 设计画布
+│   │               │           ├── markdown/              # Markdown 渲染
+│   │               │           └── util/                  # 工具函数
+│   │               ├── common/             # 通用代码（跨平台）
+│   │               │   ├── senweaverSettingsService.ts    # 设置服务
+│   │               │   ├── senweaverSettingsTypes.ts      # 设置类型定义
+│   │               │   ├── sendLLMMessageService.ts       # LLM 消息服务
+│   │               │   ├── sendLLMMessageTypes.ts         # 消息类型定义
+│   │               │   ├── mcpService.ts                  # MCP 协议服务
+│   │               │   ├── mcpServiceTypes.ts             # MCP 类型定义
+│   │               │   ├── skillService.ts                # 技能服务
+│   │               │   ├── agentService.ts                # Agent 服务
+│   │               │   ├── agentScheduler.ts              # Agent 调度器
+│   │               │   ├── modelCapabilities.ts           # 模型能力定义
+│   │               │   ├── toolsServiceTypes.ts           # 工具类型定义
+│   │               │   ├── smartContextManager.ts         # 智能上下文管理
+│   │               │   ├── tokenOptimizationConfig.ts     # Token 优化配置
+│   │               │   ├── tokenUsageTracker.ts           # Token 使用追踪
+│   │               │   ├── tpmRateLimiter.ts              # TPM 限速器
+│   │               │   ├── cacheService.ts                # 缓存服务
+│   │               │   ├── directoryStrService.ts         # 目录结构服务
+│   │               │   ├── messageCompressor.ts           # 消息压缩
+│   │               │   ├── performanceMonitor.ts          # 性能监控
+│   │               │   └── helpers/                       # 辅助函数
+│   │               │       ├── colors.ts                  # 颜色工具
+│   │               │       ├── extractCodeFromResult.ts   # 代码提取
+│   │               │       ├── languageHelpers.ts         # 语言辅助
+│   │               │       ├── systemInfo.ts              # 系统信息
+│   │               │       └── util.ts                    # 通用工具
+│   │               └── electron-main/      # Electron 主进程
+│   │                   ├── llmMessage/                    # LLM 消息处理
+│   │                   │   ├── sendLLMMessage.ts          # 消息发送
+│   │                   │   ├── sendLLMMessage.impl.ts     # 消息实现
+│   │                   │   └── extractGrammar.ts          # 语法提取
+│   │                   ├── mcpChannel.ts                  # MCP 通道
+│   │                   ├── sendLLMMessageChannel.ts       # 消息通道
+│   │                   ├── metricsMainService.ts          # 指标服务
+│   │                   ├── senweaverSCMMainService.ts     # SCM 服务
+│   │                   └── senweaverUpdateMainService.ts  # 更新服务
+│   └── vscode-dts/                         # VS Code API 类型定义
+├── build/                                  # 构建系统
+│   ├── gulpfile.*.js                       # Gulp 构建任务
+│   ├── lib/                                # 构建库
+│   ├── azure-pipelines/                    # CI/CD 配置
+│   ├── darwin/                             # macOS 构建配置
+│   ├── linux/                              # Linux 构建配置
+│   ├── win32/                              # Windows 构建配置
+│   └── npm/                                # npm 脚本
+├── extensions/                             # 内置扩展
+│   ├── git/                                # Git 集成
+│   ├── typescript-language-features/       # TypeScript 语言支持
+│   ├── python-environment/                 # Python 环境管理
+│   └── ...                                 # 其他语言扩展
+├── cli/                                    # CLI 工具 (Rust)
+│   ├── src/                                # Rust 源码
+│   ├── Cargo.toml                          # Rust 依赖配置
+│   └── Cargo.lock                          # 依赖锁定
+├── resources/                              # 资源文件
+│   ├── darwin/                             # macOS 资源（图标等）
+│   ├── linux/                              # Linux 资源
+│   ├── win32/                              # Windows 资源
+│   └── server/                             # 服务端资源
+├── remote/                                 # 远程开发支持
+├── scripts/                                # 启动和测试脚本
+│   ├── code.bat / code.sh                  # 开发启动脚本
+│   ├── test.bat / test.sh                  # 测试脚本
+│   └── ...
+├── test/                                   # 测试代码
+│   ├── unit/                               # 单元测试
+│   ├── integration/                        # 集成测试
+│   └── smoke/                              # 冒烟测试
+├── senweaver_icons/                        # SenWeaver 图标资源
+├── .vscode/                                # VS Code 开发配置
+├── .github/                                # GitHub 配置
+├── product.json                            # 产品配置
+├── package.json                            # 项目依赖
+└── README.md                               # 项目说明
 ```
 
 ## 🤝 贡献指南
