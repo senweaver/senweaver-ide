@@ -1,0 +1,176 @@
+/*--------------------------------------------------------------------------------------
+ *  Copyright 2025 Glass Devtools, Inc. All rights reserved.
+ *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
+ *--------------------------------------------------------------------------------------*/
+
+.designer-canvas-container {
+	display: flex;
+	flex-direction: column;
+	border: 1px solid var(--vscode-panel-border);
+	border-radius: 8px;
+	overflow: hidden;
+	background: var(--vscode-editor-background);
+	margin: 8px 0;
+	transition: all 0.3s ease;
+}
+
+.designer-canvas-container.fullscreen {
+	position: fixed;
+	top: 0;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	z-index: 9999;
+	margin: 0;
+	border-radius: 0;
+}
+
+.designer-canvas-header {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	padding: 8px 12px;
+	background: var(--vscode-sideBar-background);
+	border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.designer-canvas-title {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: 1;
+}
+
+.design-type-badge {
+	display: inline-block;
+	padding: 2px 8px;
+	border-radius: 4px;
+	font-size: 11px;
+	font-weight: 600;
+	text-transform: uppercase;
+	background: var(--vscode-badge-background);
+	color: var(--vscode-badge-foreground);
+}
+
+.design-title {
+	font-size: 13px;
+	font-weight: 500;
+	color: var(--vscode-foreground);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.designer-canvas-actions {
+	display: flex;
+	gap: 4px;
+}
+
+.canvas-action-btn {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 4px 8px;
+	border: none;
+	border-radius: 4px;
+	background: transparent;
+	color: var(--vscode-foreground);
+	cursor: pointer;
+	transition: background 0.2s ease;
+}
+
+.canvas-action-btn:hover {
+	background: var(--vscode-toolbar-hoverBackground);
+}
+
+.canvas-action-btn:active {
+	background: var(--vscode-toolbar-activeBackground);
+}
+
+.designer-canvas-frame {
+	flex: 1;
+	min-height: 400px;
+	background: white;
+	position: relative;
+}
+
+.designer-canvas-container.fullscreen .designer-canvas-frame {
+	min-height: calc(100vh - 48px);
+}
+
+.design-iframe {
+	width: 100%;
+	height: 100%;
+	border: none;
+	display: block;
+}
+
+/* Design grid for multiple designs */
+.designer-grid {
+	display: grid;
+	grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+	gap: 16px;
+	padding: 16px;
+}
+
+@media (max-width: 768px) {
+	.designer-grid {
+		grid-template-columns: 1fr;
+	}
+}
+
+/* Design type specific colors */
+.design-type-badge[data-type="mockup"] {
+	background: #3b82f6;
+	color: white;
+}
+
+.design-type-badge[data-type="component"] {
+	background: #10b981;
+	color: white;
+}
+
+.design-type-badge[data-type="wireframe"] {
+	background: #6366f1;
+	color: white;
+}
+
+/* Designer message preview button */
+.designer-message-preview-button {
+	margin: 12px 0;
+	display: flex;
+	justify-content: flex-start;
+}
+
+.open-preview-btn {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 10px 16px;
+	border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
+	border-radius: 6px;
+	background: var(--vscode-button-background);
+	color: var(--vscode-button-foreground);
+	font-size: 13px;
+	font-weight: 500;
+	cursor: pointer;
+	transition: all 0.2s ease;
+}
+
+.open-preview-btn:hover {
+	background: var(--vscode-button-hoverBackground);
+	transform: translateY(-1px);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.open-preview-btn:active {
+	transform: translateY(0);
+}
+
+.open-preview-btn .design-type-badge {
+	font-size: 10px;
+	padding: 2px 6px;
+	border-radius: 3px;
+	text-transform: uppercase;
+	font-weight: 600;
+}
