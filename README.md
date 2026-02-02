@@ -24,7 +24,50 @@
 
 ---
 
-## 📖 简介
+## � 功能预览
+
+<table>
+  <tr>
+    <td align="center" width="50%">
+      <img src="resources/demo1.png" alt="智能对话助手">
+      <br><b>🤖 智能对话助手</b>
+      <br><sub>自然语言对话，获取实时信息，执行复杂任务</sub>
+    </td>
+    <td align="center" width="50%">
+      <img src="resources/demo2.png" alt="文档生成">
+      <br><b>📝 智能文档生成</b>
+      <br><sub>一键生成报告、论文、周报、简历等专业文档</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="resources/demo3.png" alt="内置浏览器">
+      <br><b>🌐 内置浏览器</b>
+      <br><sub>无需切换窗口，直接在 IDE 中预览和调试网页</sub>
+    </td>
+    <td align="center">
+      <img src="resources/demo4.png" alt="模型设置">
+      <br><b>⚙️ 多模型配置</b>
+      <br><sub>灵活配置多种 AI 模型，支持自定义 API</sub>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="resources/demo5.png" alt="代码安全检测">
+      <br><b>🛡️ 代码安全助手</b>
+      <br><sub>AI 驱动的代码安全检测与智能修复建议</sub>
+    </td>
+    <td align="center">
+      <img src="resources/demo6.png" alt="UI 设计模式">
+      <br><b>🎨 UI 设计模式</b>
+      <br><sub>通过 AI 对话快速生成精美的 UI 界面</sub>
+    </td>
+  </tr>
+</table>
+
+---
+
+## �📖 简介
 
 **SenWeaver IDE** 是一款基于 VS Code 深度定制的智能代码编辑器，集成了强大的 AI 辅助编程能力。它不仅继承了 VS Code 的所有优秀特性，还增加了多项创新功能，让开发者能够更高效地编写代码。
 
