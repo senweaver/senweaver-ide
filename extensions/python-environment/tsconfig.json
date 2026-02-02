@@ -1,0 +1,14 @@
+{
+	"extends": "../tsconfig.base.json",
+	"compilerOptions": {
+		"outDir": "./out",
+		"rootDir": "./src",
+		"sourceMap": true,
+		"noUnusedLocals": false
+	},
+	"include": [
+		"src/**/*",
+		"../../src/vscode-dts/vscode.d.ts"
+	],
+	"exclude": ["node_modules", "out"]
+}

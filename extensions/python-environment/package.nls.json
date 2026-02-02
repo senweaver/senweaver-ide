@@ -1,0 +1,14 @@
+{
+    "displayName": "Python Environment Manager",
+    "description": "Python virtual environment detection and management for SenWeaver IDE",
+    "command.selectInterpreter": "Select Python Interpreter",
+    "command.refreshEnvironments": "Refresh Python Environments",
+    "command.createVirtualEnv": "Create Virtual Environment",
+    "config.defaultInterpreterPath": "Path to the default Python interpreter",
+    "config.pythonPath": "Path to the Python interpreter (deprecated, use defaultInterpreterPath)",
+    "config.venvPath": "Path to folder with a list of Virtual Environments",
+    "config.venvFolders": "Folder names to look for virtual environments",
+    "config.condaPath": "Path to the conda executable",
+    "config.autoDetectVirtualEnvs": "Automatically detect virtual environments in the workspace",
+    "config.languageServer": "Language server to use (set to None when using basedpyright)"
+}

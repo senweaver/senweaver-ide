@@ -1,0 +1,15 @@
+{
+    "displayName": "Python 环境管理器",
+    "description": "为 SenWeaver IDE 提供 Python 虚拟环境检测和管理功能",
+    "command.selectInterpreter": "选择 Python 解释器",
+    "command.refreshEnvironments": "刷新 Python 环境",
+    "command.createVirtualEnv": "创建虚拟环境",
+    "config.defaultInterpreterPath": "默认 Python 解释器路径",
+    "config.pythonPath": "Python 解释器路径（已弃用，请使用 defaultInterpreterPath）",
+    "config.venvPath": "包含虚拟环境列表的文件夹路径",
+    "config.venvFolders": "要搜索的虚拟环境文件夹名称",
+    "config.condaPath": "Conda 可执行文件路径",
+    "config.autoDetectVirtualEnvs": "自动检测工作区中的虚拟环境",
+    "config.languageServer": "要使用的语言服务器（使用 basedpyright 时设置为 None）"
+}
+

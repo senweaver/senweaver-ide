@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=SenWeaver - URL Handler
+Comment=Open source AI code editor.
+GenericName=Text Editor
+Exec=senweaver --open-url %U
+Icon=senweaver
+Type=Application
+NoDisplay=true
+StartupNotify=true
+Categories=Utility;TextEditor;Development;IDE;
+MimeType=x-scheme-handler/senweaver;
+Keywords=senweaver;

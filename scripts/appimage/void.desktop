@@ -1,0 +1,27 @@
+[Desktop Entry]
+Name=SenWeaver
+Comment=Open source AI code editor.
+GenericName=Text Editor
+Exec=senweaver %F
+Icon=senweaver
+Type=Application
+StartupNotify=false
+StartupWMClass=SenWeaver
+Categories=TextEditor;Development;IDE;
+MimeType=application/x-senweaver-workspace;
+Keywords=senweaver;
+Actions=new-empty-window;
+
+[Desktop Action new-empty-window]
+Name=New Empty Window
+Name[de]=Neues leeres Fenster
+Name[es]=Nueva ventana vacía
+Name[fr]=Nouvelle fenêtre vide
+Name[it]=Nuova finestra vuota
+Name[ja]=新しい空のウィンドウ
+Name[ko]=�?�?�?
+Name[ru]=Новое пустое окно
+Name[zh_CN]=新建空窗�?
+Name[zh_TW]=開新空視�?
+Exec=senweaver --new-window %F
+Icon=senweaver

@@ -1,0 +1,126 @@
+{
+  "name": "python-environment",
+  "displayName": "%displayName%",
+  "description": "%description%",
+  "version": "1.0.0",
+  "publisher": "senweaver",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Other"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "capabilities": {
+    "virtualWorkspaces": true,
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Virtual environment detection requires workspace trust"
+    }
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "python-environment.selectInterpreter",
+        "title": "%command.selectInterpreter%",
+        "category": "Python"
+      },
+      {
+        "command": "python-environment.refreshEnvironments",
+        "title": "%command.refreshEnvironments%",
+        "category": "Python"
+      },
+      {
+        "command": "python-environment.createVirtualEnv",
+        "title": "%command.createVirtualEnv%",
+        "category": "Python"
+      }
+    ],
+    "configuration": {
+      "title": "Python Environment",
+      "properties": {
+        "python.defaultInterpreterPath": {
+          "type": "string",
+          "default": "python",
+          "description": "%config.defaultInterpreterPath%",
+          "scope": "resource"
+        },
+        "python.pythonPath": {
+          "type": "string",
+          "default": "",
+          "description": "%config.pythonPath%",
+          "scope": "resource",
+          "deprecationMessage": "Use python.defaultInterpreterPath instead"
+        },
+        "python.venvPath": {
+          "type": "string",
+          "default": "",
+          "description": "%config.venvPath%",
+          "scope": "resource"
+        },
+        "python.venvFolders": {
+          "type": "array",
+          "default": [
+            ".venv",
+            "venv",
+            ".env",
+            "env",
+            ".virtualenvs"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "%config.venvFolders%",
+          "scope": "resource"
+        },
+        "python.condaPath": {
+          "type": "string",
+          "default": "",
+          "description": "%config.condaPath%",
+          "scope": "machine"
+        },
+        "python.autoDetectVirtualEnvs": {
+          "type": "boolean",
+          "default": true,
+          "description": "%config.autoDetectVirtualEnvs%",
+          "scope": "resource"
+        },
+        "python.languageServer": {
+          "type": "string",
+          "default": "None",
+          "enum": ["None", "Pylance", "Jedi"],
+          "description": "%config.languageServer%",
+          "scope": "resource"
+        }
+      }
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "python-environment.selectInterpreter"
+        },
+        {
+          "command": "python-environment.refreshEnvironments"
+        },
+        {
+          "command": "python-environment.createVirtualEnv"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "node ../../node_modules/typescript/bin/tsc -p ./",
+    "watch": "node ../../node_modules/typescript/bin/tsc -watch -p ./",
+    "webpack": "node ../../node_modules/webpack/bin/webpack.js --config extension.webpack.config.js --mode production"
+  },
+  "devDependencies": {}
+}
