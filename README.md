@@ -220,7 +220,7 @@ AI 可调用丰富的内置工具完成复杂任务：
 | | `open_persistent_terminal` | 打开持久终端 |
 | | `run_persistent_command` | 在持久终端执行命令 |
 | **网络** | `web_search` | 联网搜索 |
-| | `fetch_url` | 抓取网页内容 |
+| | `fetch_url` | 获取网页内容 |
 | | `open_browser` | 打开内置浏览器 |
 | | `api_request` | 发送 HTTP 请求 |
 | **文档** | `read_document` | 读取 Office 文档 |
