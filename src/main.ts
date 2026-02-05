@@ -26,9 +26,6 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 perf.mark('code/didStartMain');
 
 perf.mark('code/willLoadMainBundle', {
-	// When built, the main bundle is a single JS file with all
-	// dependencies inlined. As such, we mark `willLoadMainBundle`
-	// as the start of the main bundle loading process.
 	startTime: Math.floor(performance.timeOrigin)
 });
 perf.mark('code/didLoadMainBundle');
@@ -39,10 +36,6 @@ const portable = configurePortable(product);
 const args = parseCLIArgs();
 // Configure static command line arguments
 const argvConfig = configureCommandlineSwitchesSync(args);
-// Enable sandbox globally unless
-// 1) disabled via command line using either
-//    `--no-sandbox` or `--disable-chromium-sandbox` argument.
-// 2) argv.json contains `disable-chromium-sandbox: true`.
 if (args['sandbox'] &&
 	!args['disable-chromium-sandbox'] &&
 	!argvConfig['disable-chromium-sandbox']) {
@@ -68,29 +61,14 @@ app.setPath('userData', userDataPath);
 
 // Resolve code cache path
 const codeCachePath = getCodeCachePath();
-
-// Disable default menu (https://github.com/electron/electron/issues/35512)
 Menu.setApplicationMenu(null);
 
 // Configure crash reporter
 perf.mark('code/willStartCrashReporter');
-// If a crash-reporter-directory is specified we store the crash reports
-// in the specified directory and don't upload them to the crash server.
-//
-// Appcenter crash reporting is enabled if
-// * enable-crash-reporter runtime argument is set to 'true'
-// * --disable-crash-reporter command line parameter is not set
-//
-// Disable crash reporting in all other cases.
 if (args['crash-reporter-directory'] || (argvConfig['enable-crash-reporter'] && !args['disable-crash-reporter'])) {
 	configureCrashReporter();
 }
 perf.mark('code/didStartCrashReporter');
-
-// Set logs path before app 'ready' event if running portable
-// to ensure that no 'logs' folder is created on disk at a
-// location outside of the portable directory
-// (https://github.com/microsoft/vscode/issues/56651)
 if (portable && portable.isPortable) {
 	app.setAppLogsPath(path.join(userDataPath, 'logs'));
 }
@@ -116,11 +94,6 @@ registerListeners();
  * resolve NLS after `app.ready` event to resolve the OS locale.
  */
 let nlsConfigurationPromise: Promise<INLSConfiguration> | undefined = undefined;
-
-// Use the most preferred OS language for language recommendation.
-// The API might return an empty array on Linux, such as when
-// the 'C' locale is the user's only configured locale.
-// No matter the OS, if the array is empty, default back to 'en'.
 const osLocale = processZhLocale((app.getPreferredSystemLanguages()?.[0] ?? 'en').toLowerCase());
 const userLocale = getUserDefinedLocale(argvConfig) || 'en';
 nlsConfigurationPromise = resolveNLSConfiguration({
@@ -130,14 +103,6 @@ nlsConfigurationPromise = resolveNLSConfiguration({
 	userDataPath,
 	nlsMetadataPath: __dirname
 });
-
-// Pass in the locale to Electron so that the
-// Windows Control Overlay is rendered correctly on Windows.
-// For now, don't pass in the locale on macOS due to
-// https://github.com/microsoft/vscode/issues/167543.
-// If the locale is `qps-ploc`, the Microsoft
-// Pseudo Language Language Pack is being used.
-// In that case, use `en` as the Electron locale.
 
 if (process.platform === 'win32' || process.platform === 'linux') {
 	const electronLocale = (!userLocale || userLocale === 'qps-ploc') ? 'en' : userLocale;
@@ -214,11 +179,6 @@ async function startup(codeCachePath: string | undefined, nlsConfig: INLSConfigu
 	startWebSearchBackendServer().catch(err => {
 		console.error('[web_search_backend] Failed to start:', err);
 	});
-
-	// clone_website 后端服务已注释，功能已由 screenshot_to_code 工具替代
-	// startCloneWebsiteBackendServer().catch(err => {
-	// 	console.error('[clone_website_backend] Failed to start:', err);
-	// });
 
 	// Start Vision Backend Server (don't await, let it run in background)
 	startVisionBackendServer().catch(err => {
@@ -304,11 +264,11 @@ async function startFetchUrlBackendServer(): Promise<void> {
 		// Try multiple possible paths
 		const possiblePaths = [
 			// Development path (src)
-			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'void', 'browser', 'startFetchUrlServer.cjs'),
+			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startFetchUrlServer.cjs'),
 			// Compiled path (out)
-			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startFetchUrlServer.cjs'),
+			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startFetchUrlServer.cjs'),
 			// Source path
-			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startFetchUrlServer.cjs'),
+			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startFetchUrlServer.cjs'),
 		];
 
 		let serverPath: string | null = null;
@@ -357,9 +317,9 @@ async function startWebSearchBackendServer(): Promise<void> {
 		const fsModule = await import('fs');
 
 		const possiblePaths = [
-			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'void', 'browser', 'startWebSearchServer.cjs'),
-			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startWebSearchServer.cjs'),
-			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startWebSearchServer.cjs'),
+			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startWebSearchServer.cjs'),
+			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startWebSearchServer.cjs'),
+			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startWebSearchServer.cjs'),
 		];
 
 		let serverPath: string | null = null;
@@ -459,86 +419,6 @@ function stopWebSearchBackendServer(): void {
 	}
 }
 
-// clone_website 后端服务已注释，功能已由 screenshot_to_code 工具替代
-// /**
-//  * Start Clone Website Backend Server
-//  */
-// async function startCloneWebsiteBackendServer(): Promise<void> {
-// 	try {
-// 		const { spawn } = await import('child_process');
-// 		const pathModule = await import('path');
-// 		const fsModule = await import('fs');
-
-// 		const possiblePaths = [
-// 			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'void', 'browser', 'startCloneWebsiteServer.cjs'),
-// 			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startCloneWebsiteServer.cjs'),
-// 			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startCloneWebsiteServer.cjs'),
-// 		];
-
-// 		let serverPath: string | null = null;
-// 		for (const testPath of possiblePaths) {
-// 			if (fsModule.existsSync(testPath)) {
-// 				serverPath = testPath;
-// 				break;
-// 			}
-// 		}
-
-// 		if (!serverPath) {
-// 			console.error('[clone_website_backend] ❌ Server file not found');
-// 			return;
-// 		}
-
-// 		const serverProcess = spawn('node', [serverPath, '3003'], {
-// 			detached: false,
-// 			stdio: 'inherit'
-// 		});
-
-// 		cloneWebsiteBackendProcess = serverProcess;
-
-// 		serverProcess.on('error', (error: Error) => {
-// 			console.error('[clone_website_backend] 💥 Process error:', error);
-// 		});
-
-// 		serverProcess.on('exit', (code: number | null, signal: string | null) => {
-// 			cloneWebsiteBackendProcess = null;
-// 		});
-
-// 	} catch (error) {
-// 		console.error('[clone_website_backend] 🚨 Failed to start backend server:', error);
-// 	}
-// }
-
-// /**
-//  * Stop Clone Website Backend Server
-//  */
-// function stopCloneWebsiteBackendServer(): void {
-// 	if (cloneWebsiteBackendProcess) {
-// 		try {
-// 			// Try SIGTERM first
-// 			cloneWebsiteBackendProcess.kill('SIGTERM');
-
-// 			// Force kill after 2 seconds if still alive
-// 			setTimeout(() => {
-// 				if (cloneWebsiteBackendProcess && !cloneWebsiteBackendProcess.killed) {
-// 					cloneWebsiteBackendProcess.kill('SIGKILL');
-// 				}
-// 			}, 2000);
-
-// 		} catch (error) {
-// 			console.error('[clone_website_backend] ⚠️  Error stopping backend server:', error);
-// 			// Force kill if SIGTERM failed
-// 			try {
-// 				if (cloneWebsiteBackendProcess) {
-// 					cloneWebsiteBackendProcess.kill('SIGKILL');
-// 				}
-// 			} catch (killError) {
-// 				console.error('[clone_website_backend] ❌ Failed to force kill:', killError);
-// 			}
-// 		}
-// 		cloneWebsiteBackendProcess = null;
-// 	}
-// }
-
 /**
  * Start Vision Backend Server
  */
@@ -549,9 +429,9 @@ async function startVisionBackendServer(): Promise<void> {
 		const fsModule = await import('fs');
 
 		const possiblePaths = [
-			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'void', 'browser', 'startVisionServer.cjs'),
-			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startVisionServer.cjs'),
-			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startVisionServer.cjs'),
+			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startVisionServer.cjs'),
+			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startVisionServer.cjs'),
+			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startVisionServer.cjs'),
 		];
 
 		let serverPath: string | null = null;
@@ -628,9 +508,9 @@ async function startApiRequestBackendServer(): Promise<void> {
 		const fsModule = await import('fs');
 
 		const possiblePaths = [
-			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'void', 'browser', 'startApiRequestServer.cjs'),
-			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startApiRequestServer.cjs'),
-			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startApiRequestServer.cjs'),
+			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startApiRequestServer.cjs'),
+			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startApiRequestServer.cjs'),
+			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startApiRequestServer.cjs'),
 		];
 
 		let serverPath: string | null = null;
@@ -705,9 +585,9 @@ async function startOpenBrowserBackendServer(): Promise<void> {
 		const fsModule = await import('fs');
 
 		const possiblePaths = [
-			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'void', 'browser', 'startOpenBrowserServer.cjs'),
-			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startOpenBrowserServer.cjs'),
-			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startOpenBrowserServer.cjs'),
+			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startOpenBrowserServer.cjs'),
+			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startOpenBrowserServer.cjs'),
+			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startOpenBrowserServer.cjs'),
 		];
 
 		let serverPath: string | null = null;
@@ -781,9 +661,9 @@ async function startScreenshotToCodeBackendServer(): Promise<void> {
 		const fsModule = await import('fs');
 
 		const possiblePaths = [
-			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'void', 'browser', 'startScreenshotToCodeServer.cjs'),
-			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startScreenshotToCodeServer.cjs'),
-			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startScreenshotToCodeServer.cjs'),
+			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startScreenshotToCodeServer.cjs'),
+			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startScreenshotToCodeServer.cjs'),
+			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startScreenshotToCodeServer.cjs'),
 		];
 
 		let serverPath: string | null = null;
@@ -857,9 +737,9 @@ async function startDocumentReaderBackendServer(): Promise<void> {
 		const fsModule = await import('fs');
 
 		const possiblePaths = [
-			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'void', 'browser', 'startDocumentReaderServer.cjs'),
-			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startDocumentReaderServer.cjs'),
-			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'void', 'browser', 'startDocumentReaderServer.cjs'),
+			pathModule.join(__dirname, 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startDocumentReaderServer.cjs'),
+			pathModule.join(process.cwd(), 'out', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startDocumentReaderServer.cjs'),
+			pathModule.join(process.cwd(), 'src', 'vs', 'workbench', 'contrib', 'senweaver', 'browser', 'startDocumentReaderServer.cjs'),
 		];
 
 		let serverPath: string | null = null;
