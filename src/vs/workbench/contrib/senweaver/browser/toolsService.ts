@@ -1,6 +1,6 @@
-﻿import { CancellationToken } from '../../../../base/common/cancellation.js'
+import { CancellationToken } from '../../../../base/common/cancellation.js'
 import { URI } from '../../../../base/common/uri.js'
-import { VSBuffer } from '../../../../base/common/buffer.js'
+
 import { IFileService } from '../../../../platform/files/common/files.js'
 import { ITextFileService } from '../../../services/textfile/common/textfiles.js'
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js'
@@ -218,147 +218,504 @@ const DEFAULT_DOCUMENT_READER_PORT = 3008; // Document Reader server port (defau
 const DEFAULT_SCREENSHOT_TO_CODE_PORT = 3007; // Screenshot to Code server port (default)
 const DEFAULT_OPEN_BROWSER_PORT = 3006; // Open Browser Automation server port (default)
 
-// Dynamic port detection cache
-let _openBrowserServerPort: number | null = null;
-let _openBrowserPortDetecting = false;
-let _screenshotToCodeServerPort: number | null = null;
-let _screenshotToCodePortDetecting = false;
-let _documentReaderServerPort: number | null = null;
-let _documentReaderPortDetecting = false;
+// ==================== Port Detection with Promise-based deduplication ====================
+// Uses a shared Promise so concurrent callers wait for the same detection instead of racing
 
-// Detect actual document reader server port dynamically
-async function detectDocumentReaderPort(): Promise<number> {
-	if (_documentReaderServerPort !== null) return _documentReaderServerPort;
-	if (_documentReaderPortDetecting) {
-		// Wait for detection to complete
-		await new Promise(resolve => setTimeout(resolve, 100));
-		return _documentReaderServerPort ?? DEFAULT_DOCUMENT_READER_PORT;
-	}
+// Generic port detector factory - eliminates code duplication and fixes race conditions
+function createPortDetector(config: {
+	defaultPort: number;
+	maxAttempts: number;
+	serviceName: string;
+	probeRequest: (port: number) => { url: string; init: RequestInit };
+	validateResponse: (response: Response) => Promise<boolean>;
+}): () => Promise<number> {
+	let _cachedPort: number | null = null;
+	let _pendingDetection: Promise<number> | null = null;
 
-	_documentReaderPortDetecting = true;
-	const startPort = DEFAULT_DOCUMENT_READER_PORT;
-	const maxAttempts = 20;
+	return async function detectPort(): Promise<number> {
+		// Fast path: already detected
+		if (_cachedPort !== null) return _cachedPort;
 
-	for (let i = 0; i < maxAttempts; i++) {
-		const port = startPort + i;
-		try {
-			const controller = new AbortController();
-			const timeoutId = setTimeout(() => controller.abort(), 1000);
+		// Deduplication: if detection is in progress, wait for the same Promise
+		if (_pendingDetection !== null) return _pendingDetection;
 
-			const response = await fetch(`http://localhost:${port}/`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ file_path: '' }), // Empty path to test if service responds
-				signal: controller.signal
-			});
-
-			clearTimeout(timeoutId);
-
-			// Service responds (even with error) means it's the right port
-			if (response.status === 400 || response.status === 200) {
-				_documentReaderServerPort = port;
-				_documentReaderPortDetecting = false;
-				return port;
+		// Start detection - all concurrent callers will share this Promise
+		_pendingDetection = (async () => {
+			const startPort = config.defaultPort;
+			// Use parallel probing: fire all probes at once, take the first success
+			const probePromises: Promise<number | null>[] = [];
+			for (let i = 0; i < config.maxAttempts; i++) {
+				const port = startPort + i;
+				probePromises.push(
+					(async () => {
+						try {
+							const { url, init } = config.probeRequest(port);
+							const response = await fetch(url, {
+								...init,
+								signal: AbortSignal.timeout(2000), // 2s timeout per probe
+							});
+							if (await config.validateResponse(response)) {
+								return port;
+							}
+						} catch {
+							// Port not available
+						}
+						return null;
+					})()
+				);
 			}
-		} catch (e) {
-			// Port not available, try next
-		}
-	}
 
-	console.warn(`[ToolsService] ⚠️ Document Reader backend not detected, using default port ${startPort}`);
-	_documentReaderServerPort = startPort;
-	_documentReaderPortDetecting = false;
-	return startPort;
-}
-
-// Detect actual open browser server port dynamically
-async function detectOpenBrowserPort(): Promise<number> {
-	if (_openBrowserServerPort !== null) return _openBrowserServerPort;
-	if (_openBrowserPortDetecting) {
-		// Wait for detection to complete
-		await new Promise(resolve => setTimeout(resolve, 100));
-		return _openBrowserServerPort ?? DEFAULT_OPEN_BROWSER_PORT;
-	}
-
-	_openBrowserPortDetecting = true;
-	const startPort = DEFAULT_OPEN_BROWSER_PORT;
-	const maxAttempts = 20;
-
-	for (let i = 0; i < maxAttempts; i++) {
-		const port = startPort + i;
-		try {
-			const controller = new AbortController();
-			const timeoutId = setTimeout(() => controller.abort(), 1000);
-
-			const response = await fetch(`http://localhost:${port}/`, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({ action: 'listSessions' }),
-				signal: controller.signal
-			});
-
-			clearTimeout(timeoutId);
-
-			if (response.ok) {
-				_openBrowserServerPort = port;
-				_openBrowserPortDetecting = false;
-				return port;
-			}
-		} catch (e) {
-			// Port not available, try next
-		}
-	}
-
-	console.warn(`[ToolsService] ⚠️ Open Browser backend not detected, using default port ${startPort}`);
-	_openBrowserServerPort = startPort;
-	_openBrowserPortDetecting = false;
-	return startPort;
-}
-
-// Detect actual screenshot to code server port dynamically
-async function detectScreenshotToCodePort(): Promise<number> {
-	if (_screenshotToCodeServerPort !== null) return _screenshotToCodeServerPort;
-	if (_screenshotToCodePortDetecting) {
-		// Wait for detection to complete
-		await new Promise(resolve => setTimeout(resolve, 100));
-		return _screenshotToCodeServerPort ?? DEFAULT_SCREENSHOT_TO_CODE_PORT;
-	}
-
-	_screenshotToCodePortDetecting = true;
-	const startPort = DEFAULT_SCREENSHOT_TO_CODE_PORT;
-	const maxAttempts = 10;
-
-	for (let i = 0; i < maxAttempts; i++) {
-		const port = startPort + i;
-		try {
-			const controller = new AbortController();
-			const timeoutId = setTimeout(() => controller.abort(), 1000);
-
-			const response = await fetch(`http://localhost:${port}/health`, {
-				method: 'GET',
-				signal: controller.signal
-			});
-
-			clearTimeout(timeoutId);
-
-			if (response.ok) {
-				const data = await response.json();
-				if (data.service === 'screenshot-to-code') {
-					_screenshotToCodeServerPort = port;
-					_screenshotToCodePortDetecting = false;
-					return port;
+			// Race: return the first successfully detected port
+			const results = await Promise.allSettled(probePromises);
+			for (const r of results) {
+				if (r.status === 'fulfilled' && r.value !== null) {
+					_cachedPort = r.value;
+					_pendingDetection = null;
+					return r.value;
 				}
 			}
-		} catch (e) {
-			// Port not available, try next
+
+			console.warn(`[ToolsService] ⚠️ ${config.serviceName} backend not detected, using default port ${startPort}`);
+			_cachedPort = startPort;
+			_pendingDetection = null;
+			return startPort;
+		})();
+
+		return _pendingDetection;
+	};
+}
+
+const detectDocumentReaderPort = createPortDetector({
+	defaultPort: DEFAULT_DOCUMENT_READER_PORT,
+	maxAttempts: 20,
+	serviceName: 'Document Reader',
+	probeRequest: (port) => ({
+		url: `http://localhost:${port}/`,
+		init: { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ file_path: '' }) }
+	}),
+	validateResponse: async (response) => response.status === 400 || response.status === 200,
+});
+
+const detectOpenBrowserPort = createPortDetector({
+	defaultPort: DEFAULT_OPEN_BROWSER_PORT,
+	maxAttempts: 20,
+	serviceName: 'Open Browser',
+	probeRequest: (port) => ({
+		url: `http://localhost:${port}/`,
+		init: { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'listSessions' }) }
+	}),
+	validateResponse: async (response) => response.ok,
+});
+
+const detectScreenshotToCodePort = createPortDetector({
+	defaultPort: DEFAULT_SCREENSHOT_TO_CODE_PORT,
+	maxAttempts: 10,
+	serviceName: 'Screenshot to Code',
+	probeRequest: (port) => ({
+		url: `http://localhost:${port}/health`,
+		init: { method: 'GET' }
+	}),
+	validateResponse: async (response) => {
+		if (!response.ok) return false;
+		try {
+			const data = await response.json();
+			return data.service === 'screenshot-to-code';
+		} catch {
+			return false;
+		}
+	},
+});
+
+// ==================== edit_file 辅助函数（模块级，避免每次调用重新创建闭包） ====================
+
+// 规范化字符串：统一换行符
+const _normalizeString = (s: string): string => {
+	return s.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+}
+
+// 规范化用于比较的字符串（更宽松，移除行尾空格）
+const _normalizeForComparison = (s: string): string => {
+	return s
+		.replace(/\r\n/g, '\n')
+		.replace(/\r/g, '\n')
+		.replace(/[ \t]+$/gm, '')
+}
+
+// 计算两个字符串的行级相似度 (0-1)
+// 优化: 预拆分行数组传入，避免重复 split
+const _calculateLineSimilarity = (aLines: string[], bLines: string[]): number => {
+	const maxLen = Math.max(aLines.length, bLines.length)
+	if (maxLen === 0) return 1
+	const minLen = Math.min(aLines.length, bLines.length)
+	let matches = 0
+	for (let i = 0; i < minLen; i++) {
+		if (aLines[i].trim() === bLines[i].trim()) {
+			matches++
+		}
+	}
+	return matches / maxLen
+}
+
+const FUZZY_MATCH_THRESHOLD = 0.80
+
+// 在文件中查找最佳模糊匹配 - 健壮版本
+// 多策略 anchor line 匹配：精确 -> 去空格 -> 包含匹配 -> 滑动窗口
+type _FuzzyMatchResult = { startLine: number, endLine: number, similarity: number }
+
+const _evaluateWindow = (
+	fileLines: string[], normalizedSearchLines: string[],
+	windowStart: number, windowSize: number,
+	currentBest: _FuzzyMatchResult | null
+): _FuzzyMatchResult | null => {
+	if (windowStart < 0 || windowStart + windowSize > fileLines.length) return currentBest
+	const windowLines = fileLines.slice(windowStart, windowStart + windowSize)
+	const normalizedWindow = windowLines.map(l => _normalizeForComparison(l))
+	const similarity = _calculateLineSimilarity(normalizedWindow, normalizedSearchLines)
+	if (similarity >= FUZZY_MATCH_THRESHOLD && (!currentBest || similarity > currentBest.similarity)) {
+		return { startLine: windowStart, endLine: windowStart + windowSize, similarity }
+	}
+	return currentBest
+}
+
+const _searchAroundAnchors = (
+	fileLines: string[], searchLines: string[], normalizedSearchLines: string[],
+	nonEmptySearchLines: string[], candidateStarts: number[],
+	currentBest: _FuzzyMatchResult | null
+): _FuzzyMatchResult | null => {
+	const searchLen = searchLines.length
+	const windowSizes = [searchLen, searchLen + 1, searchLen - 1, searchLen + 2, searchLen - 2].filter(s => s > 0)
+	const anchorTrimmed = nonEmptySearchLines[0].trim()
+	const searchAnchorIdx = searchLines.findIndex(l => l.trim() === anchorTrimmed)
+	const anchorOffset = searchAnchorIdx >= 0 ? searchAnchorIdx : 0
+	let best = currentBest
+
+	for (const start of candidateStarts) {
+		for (const windowSize of windowSizes) {
+			const windowStart = start - anchorOffset
+			best = _evaluateWindow(fileLines, normalizedSearchLines, windowStart, windowSize, best)
+			best = _evaluateWindow(fileLines, normalizedSearchLines, windowStart - 1, windowSize, best)
+			best = _evaluateWindow(fileLines, normalizedSearchLines, windowStart + 1, windowSize, best)
+		}
+		if (best && best.similarity >= 0.95) break
+	}
+	return best
+}
+
+const _findBestMatchText = (fileLines: string[], searchContent: string): { matchedText: string, similarity: number } | null => {
+	const searchLines = searchContent.split('\n')
+	const nonEmptySearchLines = searchLines.filter(l => l.trim().length > 0)
+	if (nonEmptySearchLines.length === 0) return null
+
+	const normalizedSearchLines = _normalizeForComparison(searchContent).split('\n')
+	const searchLen = searchLines.length
+
+	let best: _FuzzyMatchResult | null = null
+
+	// 策略 1: 精确 anchor 匹配（search 第一个非空行完全匹配）
+	const anchorLine = nonEmptySearchLines[0].trim()
+	let candidateStarts: number[] = []
+	for (let i = 0; i < fileLines.length; i++) {
+		if (fileLines[i].trim() === anchorLine) {
+			candidateStarts.push(i)
+		}
+	}
+	if (candidateStarts.length > 0) {
+		best = _searchAroundAnchors(fileLines, searchLines, normalizedSearchLines, nonEmptySearchLines, candidateStarts, best)
+		if (best && best.similarity >= 0.90) {
+			return { matchedText: fileLines.slice(best.startLine, best.endLine).join('\n'), similarity: best.similarity }
 		}
 	}
 
-	console.warn(`[ToolsService] ⚠️ Screenshot to Code backend not detected, using default port ${startPort}`);
-	_screenshotToCodeServerPort = startPort;
-	_screenshotToCodePortDetecting = false;
-	return startPort;
+	// 策略 2: 去空格 anchor 匹配（移除所有空格后比较）
+	const anchorNoWs = anchorLine.replace(/\s+/g, '')
+	if (anchorNoWs.length > 5) {
+		candidateStarts = []
+		for (let i = 0; i < fileLines.length; i++) {
+			if (fileLines[i].trim().replace(/\s+/g, '') === anchorNoWs) {
+				candidateStarts.push(i)
+			}
+		}
+		if (candidateStarts.length > 0 && candidateStarts.length <= 20) {
+			best = _searchAroundAnchors(fileLines, searchLines, normalizedSearchLines, nonEmptySearchLines, candidateStarts, best)
+			if (best && best.similarity >= 0.85) {
+				return { matchedText: fileLines.slice(best.startLine, best.endLine).join('\n'), similarity: best.similarity }
+			}
+		}
+	}
+
+	// 策略 3: 使用多个 anchor lines（第一行 + 最后一行）
+	if (nonEmptySearchLines.length >= 3) {
+		const lastAnchor = nonEmptySearchLines[nonEmptySearchLines.length - 1].trim()
+		candidateStarts = []
+		for (let i = 0; i < fileLines.length; i++) {
+			if (fileLines[i].trim() === lastAnchor) {
+				for (let j = Math.max(0, i - searchLen - 2); j <= i; j++) {
+					if (fileLines[j].trim() === anchorLine) {
+						candidateStarts.push(j)
+					}
+				}
+			}
+		}
+		if (candidateStarts.length > 0) {
+			best = _searchAroundAnchors(fileLines, searchLines, normalizedSearchLines, nonEmptySearchLines, candidateStarts, best)
+			if (best && best.similarity >= 0.80) {
+				return { matchedText: fileLines.slice(best.startLine, best.endLine).join('\n'), similarity: best.similarity }
+			}
+		}
+	}
+
+	// 策略 4: 滑动窗口（无 anchor，仅对小文件或短搜索使用）
+	if (fileLines.length <= 2000 || searchLen <= 5) {
+		for (let i = 0; i <= fileLines.length - searchLen; i++) {
+			best = _evaluateWindow(fileLines, normalizedSearchLines, i, searchLen, best)
+			if (best && best.similarity >= 0.95) break
+		}
+		if (!best || best.similarity < 0.90) {
+			for (const ws of [searchLen + 1, searchLen - 1]) {
+				if (ws <= 0) continue
+				for (let i = 0; i <= fileLines.length - ws; i++) {
+					best = _evaluateWindow(fileLines, normalizedSearchLines, i, ws, best)
+					if (best && best.similarity >= 0.95) break
+				}
+			}
+		}
+	}
+
+	if (best) {
+		return { matchedText: fileLines.slice(best.startLine, best.endLine).join('\n'), similarity: best.similarity }
+	}
+	return null
 }
+
+// 模糊匹配修复 blocks - 同步版本，使用预获取的文件内容
+const _fixBlocksWithFuzzyMatch = (blocks: Array<{ search: string, replace: string }>, fileContent: string): Array<{ search: string, replace: string, fixed: boolean }> => {
+	const content = _normalizeString(fileContent)
+	const fileLines = content.split('\n')
+
+	return blocks.map(block => {
+		if (!block.search) {
+			return { ...block, fixed: false }
+		}
+
+		// 统一规范化 search 内容（LLM 可能生成 \r\n）
+		const normalizedSearch = _normalizeString(block.search)
+
+		// 如果精确匹配存在，不需要修复（但替换为规范化版本以确保一致性）
+		if (content.includes(normalizedSearch)) {
+			if (normalizedSearch !== block.search) {
+				return { search: normalizedSearch, replace: block.replace, fixed: true }
+			}
+			return { ...block, fixed: false }
+		}
+
+		// 尝试去除每行首尾空格后的匹配
+		const trimmedSearch = normalizedSearch.split('\n').map(l => l.trim()).join('\n')
+		const trimmedContent = content.split('\n').map(l => l.trim()).join('\n')
+		if (trimmedSearch.length > 0 && trimmedContent.includes(trimmedSearch)) {
+			// 找到 trim 匹配的行号范围，然后返回原始内容
+			const trimmedLines = trimmedContent.split('\n')
+			const trimmedSearchLines = trimmedSearch.split('\n')
+			for (let i = 0; i <= trimmedLines.length - trimmedSearchLines.length; i++) {
+				let found = true
+				for (let j = 0; j < trimmedSearchLines.length; j++) {
+					if (trimmedLines[i + j] !== trimmedSearchLines[j]) {
+						found = false
+						break
+					}
+				}
+				if (found) {
+					const matchedText = fileLines.slice(i, i + trimmedSearchLines.length).join('\n')
+					return { search: matchedText, replace: block.replace, fixed: true }
+				}
+			}
+		}
+
+		// 尝试模糊匹配
+		const match = _findBestMatchText(fileLines, normalizedSearch)
+		if (match && match.similarity >= FUZZY_MATCH_THRESHOLD) {
+			return { search: match.matchedText, replace: block.replace, fixed: true }
+		}
+		return { search: normalizedSearch, replace: block.replace, fixed: false }
+	})
+}
+
+// 完整的 block 提取逻辑（仅在快速路径失败时调用）
+const _extractBlocksFull = (input: any, ORIGINAL_MARKER: string, DIVIDER_MARKER: string, FINAL_MARKER: string): Array<{ search: string, replace: string }> => {
+	const blocks: Array<{ search: string, replace: string }> = []
+	if (input === null || input === undefined) return blocks
+
+	// 特殊处理：输入太短
+	if (typeof input === 'string' && input.trim().length < 10) return blocks
+
+	let content = typeof input === 'string' ? input : JSON.stringify(input)
+
+	// 统一换行符（\r\n -> \n）
+	content = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+
+	// 清理包装
+	content = content
+		.replace(/<search_replace_blocks>([\s\S]*?)<\/search_replace_blocks>/gi, '$1')
+		.replace(/<search_replace_blocks[^>]*\/?>/gi, '')
+		.replace(/<\/search_replace_blocks>/gi, '')
+		.replace(/```(?:json|javascript|typescript|python|text|diff|plain)?\s*\n?([\s\S]*?)```/gi, '$1')
+		.trim()
+
+	// 规范化各种标记格式
+	content = content
+		.replace(/<{5,}\s*>{0,}\s*(?:ORIGINAL|SEARCH|HEAD)/gi, ORIGINAL_MARKER)
+		.replace(/<{5,}\s*(?:ORIGINAL|SEARCH|HEAD)/gi, ORIGINAL_MARKER)
+		.replace(/<<<+\s*ORIGINAL\s*\n/gi, ORIGINAL_MARKER + '\n')
+		.replace(/<{8,}/g, '<<<<<<<')
+		.replace(/>{8,}/g, '>>>>>>>')
+		.replace(/>{5,}\s*(?:UPDATED|REPLACE|NEW|CHANGED|MODIFIED|FINAL|END|RESULT)/gi, FINAL_MARKER)
+		.replace(/>>>+\s*UPDATED\s*\n/gi, FINAL_MARKER + '\n')
+		.replace(/^>{5,}\s*$/gim, FINAL_MARKER)
+		// 仅规范化单独占一行的 7+ 个等号，避免误匹配代码中的等号
+		.replace(/^={7,}\s*$/gm, DIVIDER_MARKER)
+
+	// 标准格式提取
+	const markerPattern = /<<<<<<< ORIGINAL\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> UPDATED/g
+	let match
+	while ((match = markerPattern.exec(content)) !== null) {
+		blocks.push({ search: match[1], replace: match[2] })
+	}
+	if (blocks.length > 0) return blocks
+
+	// 通用状态机解析（修复 Claude 格式 bug：正确处理有/无 ORIGINAL 标记的情况）
+	if (content.includes('=======') && content.includes('>>>>>>>')) {
+		const lines = content.split('\n')
+		let phase: 'idle' | 'search' | 'replace' = 'idle'
+		let searchLines: string[] = []
+		let replaceLines: string[] = []
+		let prefixLines: string[] = [] // 在 idle 状态积累的行（用于没有 ORIGINAL 标记的情况）
+
+		for (const line of lines) {
+			// 检测开始标记 <<<<<<< ORIGINAL
+			if (line.match(/^<{5,}\s*(?:ORIGINAL|SEARCH|HEAD)/i)) {
+				// 开始新的搜索块
+				phase = 'search'
+				searchLines = []
+				replaceLines = []
+				prefixLines = []
+				continue
+			}
+
+			// 检测分隔符 =======
+			if (line.trim() === '=======' || line.match(/^={7,}\s*$/)) {
+				if (phase === 'search') {
+					// 正常流程：从 search -> replace
+					phase = 'replace'
+					replaceLines = []
+				} else if (phase === 'idle') {
+					// Claude 格式：没有 ORIGINAL 标记，前面积累的行就是 search
+					searchLines = [...prefixLines]
+					prefixLines = []
+					phase = 'replace'
+					replaceLines = []
+				}
+				// 如果已经在 replace 阶段再次遇到 =======，忽略（可能是代码内容）
+				continue
+			}
+
+			// 检测结束标记 >>>>>>> UPDATED
+			if (line.match(/^>{5,}\s*(?:UPDATED|REPLACE|NEW|CHANGED|MODIFIED|FINAL|END|RESULT)?/i)) {
+				if (phase === 'replace') {
+					// 完成一个块
+					if (searchLines.length > 0 || replaceLines.length > 0) {
+						blocks.push({ search: searchLines.join('\n'), replace: replaceLines.join('\n') })
+					}
+				}
+				// 重置状态
+				phase = 'idle'
+				searchLines = []
+				replaceLines = []
+				prefixLines = []
+				continue
+			}
+
+			// 积累内容
+			switch (phase) {
+				case 'idle':
+					prefixLines.push(line)
+					break
+				case 'search':
+					searchLines.push(line)
+					break
+				case 'replace':
+					replaceLines.push(line)
+					break
+			}
+		}
+		if (blocks.length > 0) return blocks
+	}
+
+	// JSON 格式回退
+	try {
+		const parsed = JSON.parse(content)
+		if (Array.isArray(parsed)) {
+			for (const item of parsed) {
+				if (item && typeof item === 'object') {
+					const search = String(item.search || item.old || item.original || '').trim()
+					const replace = String(item.replace || item.new || item.updated || '').trim()
+					if (search || replace) blocks.push({ search, replace })
+				}
+			}
+		} else if (parsed && typeof parsed === 'object') {
+			const search = String(parsed.search || parsed.old || parsed.original || '').trim()
+			const replace = String(parsed.replace || parsed.new || parsed.updated || '').trim()
+			if (search || replace) blocks.push({ search, replace })
+		}
+	} catch { /* ignore */ }
+
+	return blocks
+}
+
+// ==================== JSON 解析工具函数（去重） ====================
+const _tryParseJsonFromString = (input: unknown): any | null => {
+	if (input && typeof input === 'object') return input;
+	if (typeof input !== 'string') return null;
+
+	const trimmed = input.trim();
+	const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+	const baseCandidate = (fenceMatch ? fenceMatch[1] : trimmed).trim();
+	const normalizedCandidate = baseCandidate
+		.replace(/[""„‟]/g, '"')
+		.replace(/[''‚‛]/g, "'")
+		.replace(/：/g, ':')
+		.replace(/，/g, ',')
+		.replace(/,\s*([}\]])/g, '$1');
+
+	const attempt = (candidate: string): any | null => {
+		try { return JSON.parse(candidate); } catch { return null; }
+	};
+
+	let parsed = attempt(baseCandidate) || attempt(normalizedCandidate);
+	if (parsed && typeof parsed === 'object') return parsed;
+
+	const firstObj = normalizedCandidate.indexOf('{');
+	const lastObj = normalizedCandidate.lastIndexOf('}');
+	if (firstObj !== -1 && lastObj > firstObj) {
+		parsed = attempt(normalizedCandidate.slice(firstObj, lastObj + 1));
+		if (parsed && typeof parsed === 'object') return parsed;
+	}
+
+	const firstArr = normalizedCandidate.indexOf('[');
+	const lastArr = normalizedCandidate.lastIndexOf(']');
+	if (firstArr !== -1 && lastArr > firstArr) {
+		parsed = attempt(normalizedCandidate.slice(firstArr, lastArr + 1));
+		if (parsed && typeof parsed === 'object') return parsed;
+	}
+
+	if (normalizedCandidate.startsWith('"') && normalizedCandidate.endsWith('"')) {
+		const unescaped = attempt(normalizedCandidate);
+		if (typeof unescaped === 'string') {
+			const innerParsed = attempt(unescaped);
+			if (innerParsed && typeof innerParsed === 'object') return innerParsed;
+		}
+	}
+
+	return null;
+};
 
 // tool use for AI
 type ValidateBuiltinParams = { [T in BuiltinToolName]: (p: RawToolParamsObj) => BuiltinToolCallParams[T] }
@@ -373,10 +730,9 @@ const isFalsy = (u: unknown) => {
 
 // Clean up AI-generated metadata tags from URI/path values
 // Only used for URI parameters, NOT for code content
-const cleanAIMetadataTags = (str: string): string => {
-	// Remove common AI metadata tags WITH their content
-	// Pattern: <tagname>simple_value</tagname>
-	const aiMetadataTags = [
+// Pre-compiled regex for performance - avoid re-creating on every call
+const _aiMetadataTagRegex = (() => {
+	const tags = [
 		'is_folder', 'isfolder', 'isFolder',
 		'is_file', 'isfile', 'isFile',
 		'type', 'folder_type', 'file_type',
@@ -384,13 +740,13 @@ const cleanAIMetadataTags = (str: string): string => {
 		'recursive', 'is_recursive', 'isRecursive',
 		'kind', 'mode', 'is_dir', 'isDir'
 	]
-	let cleaned = str
-	for (const tag of aiMetadataTags) {
-		// Remove <tag>content</tag> pattern (case insensitive)
-		const regex = new RegExp(`<${tag}>[^<]*</${tag}>`, 'gi')
-		cleaned = cleaned.replace(regex, '')
-	}
-	return cleaned.trim()
+	// Build a single combined regex: <(tag1|tag2|...)>[^<]*</(tag1|tag2|...)>
+	const tagGroup = tags.join('|')
+	return new RegExp(`<(?:${tagGroup})>[^<]*</(?:${tagGroup})>`, 'gi')
+})()
+
+const cleanAIMetadataTags = (str: string): string => {
+	return str.replace(_aiMetadataTagRegex, '').trim()
 }
 
 // Simple string validation - similar to original implementation
@@ -549,6 +905,24 @@ const getParamWithAliases = (params: RawToolParamsObj, primaryName: string, alia
 const URI_ALIASES = ['path', 'file_path', 'filepath', 'directory', 'dir', 'target', 'location']
 const QUERY_ALIASES = ['search', 'search_query', 'keyword', 'keywords', 'term']
 
+// Pre-computed Sets for checkIfIsFolder - avoid re-creating arrays on every call
+const _commonFileExtensions = new Set([
+	'.js', '.ts', '.jsx', '.tsx', '.vue', '.svelte',
+	'.css', '.scss', '.sass', '.less', '.styl',
+	'.html', '.htm', '.xml', '.svg',
+	'.json', '.yaml', '.yml', '.toml', '.ini', '.env',
+	'.md', '.txt', '.log', '.csv',
+	'.py', '.rb', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.hpp',
+	'.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd',
+	'.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp',
+	'.woff', '.woff2', '.ttf', '.eot',
+	'.lock', '.map', '.d.ts', '.config.js', '.config.ts',
+	'.gitignore', '.npmrc', '.nvmrc', '.editorconfig',
+])
+const _dotFolders = new Set(['.git', '.vscode', '.idea', '.github', '.husky', '.config', '.cache', '.next', '.nuxt'])
+const _folderPatterns = new Set(['src', 'lib', 'dist', 'build', 'public', 'assets', 'components', 'pages', 'styles', 'utils', 'hooks', 'types', 'api', 'services', 'store', 'config', 'test', 'tests', 'spec', 'docs', 'scripts', 'bin', 'node_modules', 'vendor', 'frontend', 'backend', 'home'])
+const _alphaNumRegex = /^[a-zA-Z0-9]+$/
+
 const checkIfIsFolder = (uriStr: string) => {
 	uriStr = uriStr.trim()
 	// 1. 如果以斜杠结尾，一定是目录
@@ -557,50 +931,36 @@ const checkIfIsFolder = (uriStr: string) => {
 	// 2. 获取路径的最后一部分（文件名或目录名）
 	const lastPart = uriStr.split(/[/\\]/).pop() || ''
 
-	// 3. 如果最后一部分不包含点号，或者只以点号开头（如 .gitignore），则需要进一步判断
-	// 常见的文件扩展名列表
-	const commonExtensions = [
-		'.js', '.ts', '.jsx', '.tsx', '.vue', '.svelte',
-		'.css', '.scss', '.sass', '.less', '.styl',
-		'.html', '.htm', '.xml', '.svg',
-		'.json', '.yaml', '.yml', '.toml', '.ini', '.env',
-		'.md', '.txt', '.log', '.csv',
-		'.py', '.rb', '.go', '.rs', '.java', '.c', '.cpp', '.h', '.hpp',
-		'.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd',
-		'.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp',
-		'.woff', '.woff2', '.ttf', '.eot',
-		'.lock', '.map', '.d.ts', '.config.js', '.config.ts',
-		'.gitignore', '.npmrc', '.nvmrc', '.editorconfig',
-	]
-
-	// 4. 检查是否有常见的文件扩展名
+	// 3. 快速扩展名检查 - 提取最后一个 '.' 之后的部分
 	const lowerUri = uriStr.toLowerCase()
-	for (const ext of commonExtensions) {
-		if (lowerUri.endsWith(ext)) {
-			return false // 有扩展名，是文件
+	const lastDotIdx = lowerUri.lastIndexOf('.')
+	if (lastDotIdx !== -1) {
+		const ext = lowerUri.substring(lastDotIdx)
+		if (_commonFileExtensions.has(ext)) return false
+		// 也检查复合扩展名如 .d.ts, .config.js
+		const secondLastDotIdx = lowerUri.lastIndexOf('.', lastDotIdx - 1)
+		if (secondLastDotIdx !== -1) {
+			const compoundExt = lowerUri.substring(secondLastDotIdx)
+			if (_commonFileExtensions.has(compoundExt)) return false
 		}
 	}
 
-	// 5. 检查最后一部分是否包含点号（可能是未知扩展名的文件）
-	// 但排除一些特殊情况（如 .git, .vscode 等是目录）
-	const dotFolders = ['.git', '.vscode', '.idea', '.github', '.husky', '.config', '.cache', '.next', '.nuxt']
-	if (dotFolders.includes(lastPart.toLowerCase())) {
-		return true // 是常见的点开头目录
+	// 4. 检查是否是点开头的目录
+	const lastPartLower = lastPart.toLowerCase()
+	if (_dotFolders.has(lastPartLower)) {
+		return true
 	}
 
-	// 6. 如果最后一部分包含点号，且点号后面有内容，可能是文件
+	// 5. 如果最后一部分包含点号，且点号后面有内容，可能是文件
 	if (lastPart.includes('.') && !lastPart.startsWith('.')) {
 		const extPart = lastPart.split('.').pop() || ''
-		// 如果扩展名部分只有字母且长度合理（1-10），认为是文件
-		if (extPart.length > 0 && extPart.length <= 10 && /^[a-zA-Z0-9]+$/.test(extPart)) {
+		if (extPart.length > 0 && extPart.length <= 10 && _alphaNumRegex.test(extPart)) {
 			return false // 是文件
 		}
 	}
 
 	// 7. 默认情况：如果路径看起来像目录名（没有扩展名），认为是目录
-	// 常见的目录名模式
-	const folderPatterns = ['src', 'lib', 'dist', 'build', 'public', 'assets', 'components', 'pages', 'styles', 'utils', 'hooks', 'types', 'api', 'services', 'store', 'config', 'test', 'tests', 'spec', 'docs', 'scripts', 'bin', 'node_modules', 'vendor', 'frontend', 'backend', 'home']
-	if (folderPatterns.includes(lastPart.toLowerCase())) {
+	if (_folderPatterns.has(lastPartLower)) {
 		return true
 	}
 
@@ -630,7 +990,7 @@ export class ToolsService implements IToolsService {
 	public stringOfResult: BuiltinToolResultToString;
 
 	constructor(
-		@IFileService private readonly fileService: IFileService,
+		@IFileService fileService: IFileService,
 		@ITextFileService textFileService: ITextFileService,
 		@IWorkspaceContextService workspaceContextService: IWorkspaceContextService,
 		@ISearchService searchService: ISearchService,
@@ -763,27 +1123,44 @@ export class ToolsService implements IToolsService {
 			},
 
 			rewrite_file: (params: RawToolParamsObj) => {
-				const { uri: uriStr, new_content: newContentUnknown } = params
-				const uri = validateURIInWorkspace(uriStr)
-				const newContent = validateStr('newContent', newContentUnknown)
+				const uriUnknown = getParamWithAliases(params, 'uri', URI_ALIASES)
+				const uri = validateURIInWorkspace(uriUnknown)
+				const newContentUnknown = params.new_content ?? params.newContent ?? params.content ?? params.code ?? params.text
+				const newContent = validateStr('new_content', newContentUnknown)
 				return { uri, newContent }
 			},
 
 			edit_file: (params: RawToolParamsObj) => {
-				const { uri: uriStr, search_replace_blocks: searchReplaceBlocksUnknown } = params
-				const uri = validateURIInWorkspace(uriStr)
-				let searchReplaceBlocks = validateStr('searchReplaceBlocks', searchReplaceBlocksUnknown)
+				const uriUnknown = getParamWithAliases(params, 'uri', URI_ALIASES)
+				const uri = validateURIInWorkspace(uriUnknown)
+
+				// 尝试多种参数名获取 search_replace_blocks（不同模型可能用不同名称）
+				const searchReplaceBlocksUnknown = params.search_replace_blocks
+					?? params.searchReplaceBlocks
+					?? params.blocks
+					?? params.changes
+					?? params.edits
+					?? params.content
+
+				let searchReplaceBlocks = validateStr('search_replace_blocks', searchReplaceBlocksUnknown)
+
+				// 统一换行符
+				searchReplaceBlocks = searchReplaceBlocks.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
 
 				// Validate that the blocks string is not empty and contains required markers
 				if (!searchReplaceBlocks || searchReplaceBlocks.trim().length === 0) {
 					throw new Error(`The search_replace_blocks parameter cannot be empty. You must provide at least one SEARCH/REPLACE block formatted with "<<<<<<< ORIGINAL", "=======", and ">>>>>>> UPDATED" markers.`)
 				}
 
-				if (!searchReplaceBlocks.includes('<<<<<<< ORIGINAL')) {
+				// 先规范化各种变体标记
+				let normalized = searchReplaceBlocks
+					.replace(/<{5,}\s*>{0,}\s*(?:ORIGINAL|SEARCH|HEAD)/gi, '<<<<<<< ORIGINAL')
+					.replace(/>{5,}\s*(?:UPDATED|REPLACE|NEW|CHANGED|MODIFIED|FINAL|END|RESULT)/gi, '>>>>>>> UPDATED')
+
+				if (!normalized.includes('<<<<<<< ORIGINAL')) {
 					// Compatibility: allow simplified format "<original> ======= <updated>" (single block)
-					// This preserves existing behavior for standard formatted blocks.
-					if (searchReplaceBlocks.includes('=======')) {
-						const parts = searchReplaceBlocks.split(/\s*={7,}\s*/)
+					if (normalized.includes('=======')) {
+						const parts = normalized.split(/\n={7,}\n/)
 						if (parts.length === 2) {
 							const original = parts[0]?.trim() ?? ''
 							const updated = parts[1]?.trim() ?? ''
@@ -795,11 +1172,13 @@ export class ToolsService implements IToolsService {
 					}
 
 					const preview = searchReplaceBlocks.substring(0, 100)
-					// Check if it looks like they tried to provide full file content or CSS
 					if (searchReplaceBlocks.includes('{') || searchReplaceBlocks.includes('function') || searchReplaceBlocks.includes('import ')) {
 						throw new Error(`Invalid format: search_replace_blocks must contain "<<<<<<< ORIGINAL" markers. You provided raw code: "${preview}...". \n\nIf you want to replace the entire file, use the 'rewrite_file' tool instead. \nIf you want to edit specific parts, you MUST use the format:\n<<<<<<< ORIGINAL\n<original code>\n=======\n<new code>\n>>>>>>> UPDATED`)
 					}
 					throw new Error(`Invalid format: search_replace_blocks must contain "<<<<<<< ORIGINAL" markers. Received: "${preview}${searchReplaceBlocks.length > 100 ? '...' : ''}". Please format your blocks correctly.`)
+				} else {
+					// 使用规范化后的版本
+					searchReplaceBlocks = normalized
 				}
 
 				return { uri, searchReplaceBlocks }
@@ -1090,67 +1469,7 @@ export class ToolsService implements IToolsService {
 					throw new Error('type must be "word", "excel", or "ppt"');
 				}
 
-				// 🔧 改进的 JSON 解析函数，支持多层嵌套字符串和各种格式
-				const tryParseJsonFromString = (input: unknown): any | null => {
-					// 如果已经是对象，直接返回
-					if (input && typeof input === 'object') return input;
-					if (typeof input !== 'string') return null;
-
-					const trimmed = input.trim();
-					// 移除 markdown 代码块
-					const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-					const baseCandidate = (fenceMatch ? fenceMatch[1] : trimmed).trim();
-
-					// 标准化字符（中文标点转英文）
-					const normalizedCandidate = baseCandidate
-						.replace(/[""„‟]/g, '"')
-						.replace(/[''‚‛]/g, "'")
-						.replace(/：/g, ':')
-						.replace(/，/g, ',')
-						.replace(/,\s*([}\]])/g, '$1');
-
-					const attempt = (candidate: string): any | null => {
-						try {
-							return JSON.parse(candidate);
-						} catch {
-							return null;
-						}
-					};
-
-					// 尝试直接解析
-					let parsed = attempt(baseCandidate) || attempt(normalizedCandidate);
-					if (parsed && typeof parsed === 'object') return parsed;
-
-					// 尝试提取 JSON 对象
-					const firstObj = normalizedCandidate.indexOf('{');
-					const lastObj = normalizedCandidate.lastIndexOf('}');
-					if (firstObj !== -1 && lastObj > firstObj) {
-						parsed = attempt(normalizedCandidate.slice(firstObj, lastObj + 1));
-						if (parsed && typeof parsed === 'object') return parsed;
-					}
-
-					// 尝试提取 JSON 数组
-					const firstArr = normalizedCandidate.indexOf('[');
-					const lastArr = normalizedCandidate.lastIndexOf(']');
-					if (firstArr !== -1 && lastArr > firstArr) {
-						parsed = attempt(normalizedCandidate.slice(firstArr, lastArr + 1));
-						if (parsed && typeof parsed === 'object') return parsed;
-					}
-
-					// 🔧 尝试双重解析（如果是双重编码的 JSON 字符串）
-					if (normalizedCandidate.startsWith('"') && normalizedCandidate.endsWith('"')) {
-						const unescaped = attempt(normalizedCandidate);
-						if (typeof unescaped === 'string') {
-							const innerParsed = attempt(unescaped);
-							if (innerParsed && typeof innerParsed === 'object') return innerParsed;
-						}
-					}
-
-					return null;
-				};
-
-				const parsed = tryParseJsonFromString(document_data);
-				// 🔧 如果解析失败且是字符串，记录警告
+				const parsed = _tryParseJsonFromString(document_data);
 				if (!parsed && typeof document_data === 'string') {
 					console.warn('[create_document] Failed to parse document_data as JSON, using raw string');
 				}
@@ -1429,58 +1748,49 @@ export class ToolsService implements IToolsService {
 					throw new Error(`Another LLM is currently making changes to this file. Please stop streaming for now and ask the user to resume later.`)
 				}
 
-				// 先读取原文件内容以计算行数变化
+				// 使用 model service 获取原始行数（已缓存，避免额外 I/O）
 				let originalLineCount = 0
 				let isNewFile = false
-				try {
-					const existingContent = await this.fileService.readFile(uri)
-					const existingText = existingContent.value.toString()
-					originalLineCount = existingText ? existingText.split('\n').length : 0
-				} catch {
-					// 文件不存在，是新文件
+				const { model } = await senweaverModelService.getModelSafe(uri)
+				if (model === null) {
 					isNewFile = true
-					originalLineCount = 0
+				} else {
+					originalLineCount = model.getLineCount()
 				}
 
 				await this.editCodeService.callBeforeApplyOrEdit({ from: 'ClickApply', uri })
 				this.editCodeService.instantlyRewriteFile({ uri, newContent })
 
-				// 计算变更统计
+				// 计算变更统计（无延迟）
 				const newLineCount = newContent ? newContent.split('\n').length : 0
 				let changeStats: CodeChangeStats | undefined
 
 				if (isNewFile) {
-					// 新文件：只有新增行
 					changeStats = { linesAdded: newLineCount, linesRemoved: 0, isNewFile: true }
 				} else {
-					// 现有文件：等待diff系统更新
-					await new Promise(resolve => setTimeout(resolve, 50))
+					// 先尝试 diff 系统（同步，不等待）
 					const diffStats = this.editCodeService.calculateDiffStats(uri)
-
-					// 如果 diff 系统返回了有效数据，使用它
 					if (diffStats.linesAdded > 0 || diffStats.linesDeleted > 0) {
 						changeStats = { linesAdded: diffStats.linesAdded, linesRemoved: diffStats.linesDeleted }
 					} else {
-						// diff 系统没有数据，自己计算
+						// 直接计算行数变化
 						const linesAdded = Math.max(0, newLineCount - originalLineCount)
 						const linesRemoved = Math.max(0, originalLineCount - newLineCount)
 						if (linesAdded > 0 || linesRemoved > 0) {
 							changeStats = { linesAdded, linesRemoved }
 						} else if (newLineCount > 0) {
-							// 完整替换但行数相同，显示总行数
 							changeStats = { linesAdded: newLineCount, linesRemoved: originalLineCount }
 						}
 					}
 				}
 
-				// lint 错误检查在后台异步进行，不阻塞工具返回
-				const lintErrorsPromise = Promise.resolve().then(async () => {
-					await new Promise(resolve => setTimeout(resolve, 800))
-					const { lintErrors } = this._getLintErrors(uri)
-					return lintErrors
+				// lint 错误异步获取，不阻塞
+				const lintErrorsPromise = new Promise<LintErrorItem[] | null>(resolve => {
+					setTimeout(() => {
+						resolve(this._getLintErrors(uri).lintErrors)
+					}, 500)
 				})
 
-				// 立即返回结果，lint错误异步更新
 				return {
 					result: (async () => {
 						const lintErrors = await lintErrorsPromise
@@ -1491,304 +1801,65 @@ export class ToolsService implements IToolsService {
 
 			edit_file: async ({ uri, searchReplaceBlocks }) => {
 				await senweaverModelService.initializeModel(uri)
+
+				// 前置检查：文件必须存在才能编辑
+				const { model: preCheckModel } = await senweaverModelService.getModelSafe(uri)
+				if (preCheckModel === null) {
+					throw new Error(
+						`Cannot edit file: ${uri.fsPath} does not exist. ` +
+						`To create a new file, use 'create_file_or_folder' first, then use 'rewrite_file' to write content.`
+					)
+				}
+
 				if (this.commandBarService.getStreamState(uri) === 'streaming') {
 					throw new Error(`Another LLM is currently making changes to this file. Please stop streaming for now and ask the user to resume later.`)
 				}
 
-				// ========== 健壮的 edit_file 实现 ==========
-				// 核心原则：始终优先使用 editCodeService（支持 diff 显示和用户确认）
-				// 只有在必要时使用模糊匹配修复 ORIGINAL 内容，然后重新调用 editCodeService
+				// ========== 高效且健壮的 edit_file 实现 ==========
+				// 多层回退策略确保编辑不会失败：
+				// 1. 标准 editCodeService 应用
+				// 2. 模糊匹配修复后重试
+				// 3. 逐块应用（处理重叠）
+				// 4. 直接文本替换回退（最后手段）
 
 				const ORIGINAL_MARKER = '<<<<<<< ORIGINAL'
 				const DIVIDER_MARKER = '======='
 				const FINAL_MARKER = '>>>>>>> UPDATED'
 
-				// ========== 辅助函数 ==========
-
-				// 规范化字符串：统一换行符
-				const normalizeString = (s: string): string => {
-					return s.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
-				}
-
-				// 规范化用于比较的字符串（更宽松）
-				const normalizeForComparison = (s: string): string => {
-					return s
-						.replace(/\r\n/g, '\n')
-						.replace(/\r/g, '\n')
-						.replace(/[ \t]+$/gm, '') // 移除行尾空格
-				}
-
-				// 计算两个字符串的相似度 (0-1)，基于行级比较
-				const calculateLineSimilarity = (a: string, b: string): number => {
-					if (a === b) return 1
-					if (a.length === 0 || b.length === 0) return 0
-
-					const aLines = a.split('\n')
-					const bLines = b.split('\n')
-
-					let matches = 0
-					const maxLen = Math.max(aLines.length, bLines.length)
-					const minLen = Math.min(aLines.length, bLines.length)
-
-					for (let i = 0; i < minLen; i++) {
-						if (aLines[i].trim() === bLines[i].trim()) {
-							matches++
-						}
-					}
-
-					return matches / maxLen
-				}
-
-				// 在文件中查找最佳匹配位置（模糊匹配）- 返回实际匹配的文本
-				const findBestMatchText = (fileContent: string, searchContent: string): { matchedText: string, similarity: number } | null => {
-					const fileLines = fileContent.split('\n')
-					const searchLines = searchContent.split('\n')
-					const nonEmptySearchLines = searchLines.filter(l => l.trim().length > 0)
-
-					if (nonEmptySearchLines.length === 0) return null
-
-					let bestMatch: { startLine: number, endLine: number, similarity: number } | null = null
-
-					// 滑动窗口搜索，窗口大小允许有一定的弹性
-					const windowSizes = [searchLines.length, searchLines.length + 1, searchLines.length - 1].filter(s => s > 0)
-					const FUZZY_MATCH_THRESHOLD = 0.80 // 统一的模糊匹配阈值
-
-					for (const windowSize of windowSizes) {
-						for (let i = 0; i <= fileLines.length - windowSize; i++) {
-							const windowLines = fileLines.slice(i, i + windowSize)
-							const windowContent = windowLines.join('\n')
-							const similarity = calculateLineSimilarity(
-								normalizeForComparison(windowContent),
-								normalizeForComparison(searchContent)
-							)
-
-							if (similarity >= FUZZY_MATCH_THRESHOLD && (!bestMatch || similarity > bestMatch.similarity)) {
-								bestMatch = { startLine: i, endLine: i + windowSize, similarity }
-							}
-						}
-					}
-
-					if (bestMatch) {
-						const matchedText = fileLines.slice(bestMatch.startLine, bestMatch.endLine).join('\n')
-						return { matchedText, similarity: bestMatch.similarity }
-					}
-
-					// 精确子串匹配作为回退
-					const exactIndex = fileContent.indexOf(searchContent)
-					if (exactIndex !== -1) {
-						return { matchedText: searchContent, similarity: 1 }
-					}
-
-					return null
-				}
-
-				// 从各种格式中提取 search/replace 块
-				const extractBlocks = (input: any): Array<{ search: string, replace: string }> => {
-					const blocks: Array<{ search: string, replace: string }> = []
-
-					if (input === null || input === undefined) return blocks
-
-					// 特殊处理：如果输入是单个字符（如 "<"），说明 LLM 输出格式严重错误
-					if (typeof input === 'string' && input.trim().length < 10) {
-						// 返回空数组，让后续逻辑抛出友好的错误信息
-						return blocks
-					}
-
-					let content = typeof input === 'string' ? input : JSON.stringify(input)
-
-					// 清理包装
-					content = content
-						.replace(/<search_replace_blocks>([\s\S]*?)<\/search_replace_blocks>/gi, '$1')
-						.replace(/<search_replace_blocks[^>]*\/?>/gi, '')
-						.replace(/<\/search_replace_blocks>/gi, '')
-						.replace(/```(?:json|javascript|typescript|python|text|diff|plain)?\s*\n?([\s\S]*?)```/gi, '$1')
-						.trim()
-
-					// 规范化各种标记格式（这些是通用的，适用于所有模型）
-					content = content
-						.replace(/<{5,}\s*>{0,}\s*(?:ORIGINAL|SEARCH|HEAD)/gi, ORIGINAL_MARKER)
-						.replace(/<{5,}\s*(?:ORIGINAL|SEARCH|HEAD)/gi, ORIGINAL_MARKER)
-						.replace(/<<<+\s*ORIGINAL\s*\n/gi, ORIGINAL_MARKER + '\n') // Claude 格式规范化
-						.replace(/<{8,}/g, '<<<<<<<')
-						.replace(/>{8,}/g, '>>>>>>>')
-						.replace(/>{5,}\s*(?:UPDATED|REPLACE|NEW|CHANGED|MODIFIED|FINAL|END|RESULT)/gi, FINAL_MARKER)
-						.replace(/>>>+\s*UPDATED\s*\n/gi, FINAL_MARKER + '\n') // Claude 格式规范化
-						.replace(/^>{5,}\s*$/gim, FINAL_MARKER)
-						.replace(/===+\s*\n/g, DIVIDER_MARKER + '\n') // 规范化分隔符
-
-					// ========== 优先级 1：标准格式提取（最优先，适用于所有模型） ==========
-					const markerPattern = /<<<<<<< ORIGINAL\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> UPDATED/g
-					let match
-					while ((match = markerPattern.exec(content)) !== null) {
-						blocks.push({ search: match[1], replace: match[2] })
-					}
-
-					// 如果标准格式提取成功，立即返回
-					if (blocks.length > 0) return blocks
-
-					// ========== 优先级 2：Claude 特殊格式（仅在标准格式失败时尝试） ==========
-					// Claude 有时会省略 "<<<<<<< ORIGINAL"，只有分隔符
-					// 这个逻辑只在检测到分隔符但标准格式提取失败时才执行
-					if (content.includes('=======') && content.includes('>>>>>>>')) {
-						const lines = content.split('\n')
-						let inBlock = false
-						let currentBlock: string[] = []
-						let searchPart: string[] = []
-						let replacePart: string[] = []
-						let inReplacePart = false
-
-						for (let i = 0; i < lines.length; i++) {
-							const line = lines[i]
-
-							// 检测到分隔符
-							if (line.trim() === '=======') {
-								if (!inBlock) {
-									// 如果之前没有 ORIGINAL 标记，说明前面的内容是 search 部分
-									searchPart = [...currentBlock]
-									currentBlock = []
-									inReplacePart = true
-									inBlock = true
-								} else {
-									inReplacePart = true
-								}
-								continue
-							}
-
-							// 检测到结束标记
-							if (line.match(/^>>>+\s*(?:UPDATED|REPLACE)?/i)) {
-								if (inBlock && inReplacePart) {
-									replacePart = [...currentBlock]
-									// 添加这个块
-									if (searchPart.length > 0 || replacePart.length > 0) {
-										blocks.push({
-											search: searchPart.join('\n'),
-											replace: replacePart.join('\n')
-										})
-									}
-									// 重置
-									searchPart = []
-									replacePart = []
-									currentBlock = []
-									inBlock = false
-									inReplacePart = false
-								}
-								continue
-							}
-
-							// 检测到开始标记
-							if (line.match(/^<{5,}\s*(?:ORIGINAL|SEARCH)/i)) {
-								inBlock = true
-								inReplacePart = false
-								currentBlock = []
-								searchPart = []
-								replacePart = []
-								continue
-							}
-
-							// 累积内容
-							currentBlock.push(line)
-						}
-
-						// 如果 Claude 特殊格式提取成功，返回
-						if (blocks.length > 0) return blocks
-					}
-
-					// 尝试解析 JSON
-					try {
-						const parsed = JSON.parse(content)
-						if (Array.isArray(parsed)) {
-							for (const item of parsed) {
-								if (item && typeof item === 'object') {
-									const search = String(item.search || item.old || item.original || '').trim()
-									const replace = String(item.replace || item.new || item.updated || '').trim()
-									if (search || replace) {
-										blocks.push({ search, replace })
-									}
-								}
-							}
-						} else if (parsed && typeof parsed === 'object') {
-							const search = String(parsed.search || parsed.old || parsed.original || '').trim()
-							const replace = String(parsed.replace || parsed.new || parsed.updated || '').trim()
-							if (search || replace) {
-								blocks.push({ search, replace })
-							}
-						}
-					} catch {
-						// JSON 解析失败，忽略
-					}
-
-					return blocks
-				}
-
-				// 构建标准格式字符串
-				const buildStandardFormat = (blocks: Array<{ search: string, replace: string }>): string => {
-					return blocks.map(b =>
-						`${ORIGINAL_MARKER}\n${b.search}\n${DIVIDER_MARKER}\n${b.replace}\n${FINAL_MARKER}`
-					).join('\n\n')
-				}
-
-				// 使用模糊匹配修复 blocks 中的 search 内容
-				const fixBlocksWithFuzzyMatch = async (blocks: Array<{ search: string, replace: string }>): Promise<Array<{ search: string, replace: string, fixed: boolean }>> => {
-					const FUZZY_MATCH_THRESHOLD = 0.80 // 统一的模糊匹配阈值（与 findBestMatchText 保持一致）
-					const fileContent = await this.fileService.readFile(uri)
-					const content = normalizeString(fileContent.value.toString())
-
-					return blocks.map(block => {
-						if (!block.search) {
-							return { ...block, fixed: false }
-						}
-
-						// 如果精确匹配存在，不需要修复
-						if (content.includes(block.search)) {
-							return { ...block, fixed: false }
-						}
-
-						// 尝试模糊匹配（使用统一的阈值以提高匹配成功率，同时保持准确性）
-						const match = findBestMatchText(content, block.search)
-						if (match && match.similarity >= FUZZY_MATCH_THRESHOLD) {
-							return { search: match.matchedText, replace: block.replace, fixed: true }
-						}
-
-						return { ...block, fixed: false }
-					})
-				}
-
-				// ========== 主逻辑 ==========
-
-				// 1. 处理空值
+				// ========== 1. 处理空值 ==========
 				if (searchReplaceBlocks === null || searchReplaceBlocks === undefined) {
 					throw new Error(`searchReplaceBlocks is null or undefined.`)
 				}
 
-				// 2. 清理文件中的残留标记（只清理明确的编辑标记，避免误删有效代码）
-				try {
-					const fileContent = await this.fileService.readFile(uri)
-					let content = fileContent.value.toString()
-					const originalContent = content
+				// ========== 2. 提取编辑块 (快速路径优先) ==========
+				let blocks: Array<{ search: string, replace: string }>
 
-					// 只清理明确的编辑标记行
-					content = content
-						.replace(/^<<<<<<< (?:ORIGINAL|SEARCH|HEAD)\s*$/gm, '')
-						.replace(/^>>>>>>> (?:UPDATED|REPLACE|NEW|CHANGED|MODIFIED|FINAL|END|RESULT)\s*$/gm, '')
-						.replace(/^=======\s*$/gm, '')
-						.replace(/\n{3,}/g, '\n\n')
+				// 确保输入字符串换行符统一
+				const normalizedInput = typeof searchReplaceBlocks === 'string'
+					? searchReplaceBlocks.replace(/\r\n/g, '\n').replace(/\r/g, '\n')
+					: searchReplaceBlocks
 
-					if (content !== originalContent) {
-						await this.fileService.writeFile(uri, VSBuffer.fromString(content))
-						await new Promise(resolve => setTimeout(resolve, 50))
+				// Fast path: 如果已经是标准格式，直接用正则提取，跳过所有清理步骤
+				if (typeof normalizedInput === 'string' && normalizedInput.includes(ORIGINAL_MARKER)) {
+					blocks = []
+					const markerPattern = /<<<<<<< ORIGINAL\n([\s\S]*?)\n=======\n([\s\S]*?)\n>>>>>>> UPDATED/g
+					let match
+					while ((match = markerPattern.exec(normalizedInput)) !== null) {
+						blocks.push({ search: match[1], replace: match[2] })
 					}
-				} catch {
-					// 忽略
+
+					// 如果标准格式提取失败（格式有轻微变体），走完整路径
+					if (blocks.length === 0) {
+						blocks = _extractBlocksFull(normalizedInput, ORIGINAL_MARKER, DIVIDER_MARKER, FINAL_MARKER)
+					}
+				} else {
+					blocks = _extractBlocksFull(normalizedInput, ORIGINAL_MARKER, DIVIDER_MARKER, FINAL_MARKER)
 				}
 
-				// 3. 提取编辑块
-				let blocks = extractBlocks(searchReplaceBlocks)
-
 				if (blocks.length === 0) {
-					// 给出友好的错误提示，帮助 LLM（特别是 Claude）理解问题
 					throw new Error(
 						`Invalid format: search_replace_blocks must contain "${ORIGINAL_MARKER}" markers. ` +
-						`Received: "${typeof searchReplaceBlocks === 'string' ? searchReplaceBlocks.slice(0, 100) : JSON.stringify(searchReplaceBlocks).slice(0, 100)}...". ` +
+						`Received: "${typeof normalizedInput === 'string' ? normalizedInput.slice(0, 100) : JSON.stringify(normalizedInput).slice(0, 100)}...". ` +
 						`Please format your blocks correctly.\n\n` +
 						`Expected format:\n` +
 						`${ORIGINAL_MARKER}\n` +
@@ -1800,11 +1871,18 @@ export class ToolsService implements IToolsService {
 					)
 				}
 
-				// 4. 尝试使用 editCodeService（标准方式，支持 diff 显示）
+				// ========== 3. 多层策略尝试应用编辑 ==========
 				let applySuccess = false
 				let lastError: Error | null = null
 
-				// 第一次尝试：直接使用提取的 blocks
+				// 构建标准格式字符串
+				const buildStandardFormat = (b: Array<{ search: string, replace: string }>): string => {
+					return b.map(block =>
+						`${ORIGINAL_MARKER}\n${block.search}\n${DIVIDER_MARKER}\n${block.replace}\n${FINAL_MARKER}`
+					).join('\n\n')
+				}
+
+				// --- 策略 A: 直接使用提取的 blocks ---
 				try {
 					const standardFormat = buildStandardFormat(blocks)
 					await this.editCodeService.callBeforeApplyOrEdit({ from: 'ClickApply', uri })
@@ -1812,52 +1890,177 @@ export class ToolsService implements IToolsService {
 					applySuccess = true
 				} catch (e) {
 					lastError = e instanceof Error ? e : new Error(String(e))
-					const errorMsg = lastError.message.toLowerCase()
+				}
 
-					// 如果是 "not found" 错误，尝试模糊匹配修复
-					if (errorMsg.includes('not found') || errorMsg.includes('no match')) {
+				// --- 策略 B: 模糊匹配修复后重试 ---
+				if (!applySuccess) {
+					const errorMsg = (lastError?.message || '').toLowerCase()
+					if (errorMsg.includes('not found') || errorMsg.includes('no match') || errorMsg.includes('not unique')) {
 						try {
-							const fixedBlocks = await fixBlocksWithFuzzyMatch(blocks)
-							const hasAnyFixed = fixedBlocks.some(b => b.fixed)
+							const { model } = await senweaverModelService.getModelSafe(uri)
+							if (model) {
+								const content = model.getValue(EndOfLinePreference.LF)
+								const fixedBlocks = _fixBlocksWithFuzzyMatch(blocks, content)
+								const hasAnyFixed = fixedBlocks.some(b => b.fixed)
 
-							if (hasAnyFixed) {
-								// 使用修复后的 blocks 重新尝试
-								const fixedFormat = buildStandardFormat(fixedBlocks)
-								await this.editCodeService.callBeforeApplyOrEdit({ from: 'ClickApply', uri })
-								this.editCodeService.instantlyApplySearchReplaceBlocks({ uri, searchReplaceBlocks: fixedFormat })
-								applySuccess = true
-								blocks = fixedBlocks // 更新 blocks 用于统计
+								if (hasAnyFixed) {
+									const fixedFormat = buildStandardFormat(fixedBlocks)
+									await this.editCodeService.callBeforeApplyOrEdit({ from: 'ClickApply', uri })
+									this.editCodeService.instantlyApplySearchReplaceBlocks({ uri, searchReplaceBlocks: fixedFormat })
+									applySuccess = true
+									blocks = fixedBlocks
+								}
 							}
 						} catch (retryError) {
 							lastError = retryError instanceof Error ? retryError : new Error(String(retryError))
 						}
 					}
+				}
 
-					// 如果是重叠错误，尝试逐个应用
-					if (!applySuccess && (errorMsg.includes('overlap') || errorMsg.includes('must not overlap'))) {
+				// --- 策略 C: 逐块应用（处理重叠和部分匹配） ---
+				if (!applySuccess && blocks.length > 1) {
+					const errorMsg = (lastError?.message || '').toLowerCase()
+					// 对于重叠错误、not found、not unique 都尝试逐块
+					if (errorMsg.includes('overlap') || errorMsg.includes('must not overlap') ||
+						errorMsg.includes('not found') || errorMsg.includes('no match') ||
+						errorMsg.includes('not unique')) {
 						let successCount = 0
+						let failedBlocks: Array<{ search: string, replace: string }> = []
+
 						for (const block of blocks) {
 							try {
 								const singleFormat = buildStandardFormat([block])
 								await this.editCodeService.callBeforeApplyOrEdit({ from: 'ClickApply', uri })
 								this.editCodeService.instantlyApplySearchReplaceBlocks({ uri, searchReplaceBlocks: singleFormat })
 								successCount++
-							} catch {
-								// 单个块失败，继续下一个
+							} catch (singleErr) {
+								// 逐块模糊修复重试
+								try {
+									const { model } = await senweaverModelService.getModelSafe(uri)
+									if (model) {
+										const currentContent = model.getValue(EndOfLinePreference.LF)
+										const fixedSingle = _fixBlocksWithFuzzyMatch([block], currentContent)
+										if (fixedSingle[0].fixed) {
+											const fixedFormat = buildStandardFormat([fixedSingle[0]])
+											await this.editCodeService.callBeforeApplyOrEdit({ from: 'ClickApply', uri })
+											this.editCodeService.instantlyApplySearchReplaceBlocks({ uri, searchReplaceBlocks: fixedFormat })
+											successCount++
+											continue
+										}
+									}
+								} catch { /* 继续到回退 */ }
+								failedBlocks.push(block)
 							}
 						}
 						if (successCount > 0) {
 							applySuccess = true
+							// 如果有失败的块，尝试直接文本替换
+							if (failedBlocks.length > 0) {
+								try {
+									const { model } = await senweaverModelService.getModelSafe(uri)
+									if (model) {
+										let currentContent = model.getValue(EndOfLinePreference.LF)
+										let directFixCount = 0
+										for (const fb of failedBlocks) {
+											const normalizedSearch = _normalizeString(fb.search)
+											if (currentContent.includes(normalizedSearch)) {
+												currentContent = currentContent.replace(normalizedSearch, fb.replace)
+												directFixCount++
+											}
+										}
+										if (directFixCount > 0) {
+											this.editCodeService.instantlyRewriteFile({ uri, newContent: currentContent })
+										}
+									}
+								} catch { /* 已经部分成功，忽略剩余错误 */ }
+							}
 						}
 					}
 				}
 
-				// 5. 如果 editCodeService 失败，抛出明确错误（不使用危险的直接文件操作）
+				// --- 策略 D: 直接文本替换回退（最后手段） ---
 				if (!applySuccess) {
-					// 构建详细的错误信息，帮助 LLM 理解问题
-					const errorDetails = lastError?.message || 'Unknown error'
+					try {
+						const { model } = await senweaverModelService.getModelSafe(uri)
+						if (model) {
+							let currentContent = model.getValue(EndOfLinePreference.LF)
+							let replacementCount = 0
 
-					// 针对不同错误类型给出不同的建议
+							for (const block of blocks) {
+								const normalizedSearch = _normalizeString(block.search)
+
+								// 精确匹配
+								if (currentContent.includes(normalizedSearch)) {
+									currentContent = currentContent.replace(normalizedSearch, block.replace)
+									replacementCount++
+									continue
+								}
+
+								// 去除行首尾空格后匹配
+								const trimmedSearch = normalizedSearch.split('\n').map(l => l.trim()).join('\n')
+								const contentLines = currentContent.split('\n')
+								const searchLines = trimmedSearch.split('\n')
+								let found = false
+
+								for (let i = 0; i <= contentLines.length - searchLines.length; i++) {
+									let match = true
+									for (let j = 0; j < searchLines.length; j++) {
+										if (contentLines[i + j].trim() !== searchLines[j]) {
+											match = false
+											break
+										}
+									}
+									if (match) {
+										// 替换匹配的行，保持原始缩进
+										const matchedLines = contentLines.slice(i, i + searchLines.length)
+										const replaceLines = block.replace.split('\n')
+
+										// 检测原始缩进
+										const originalIndent = matchedLines[0].match(/^(\s*)/)?.[1] || ''
+										const searchIndent = normalizedSearch.split('\n')[0].match(/^(\s*)/)?.[1] || ''
+										const replaceWithIndent = replaceLines.map(l => {
+											if (l.trim().length === 0) return l
+											const lineIndent = l.match(/^(\s*)/)?.[1] || ''
+											// 保持相对缩进
+											if (searchIndent.length > 0 && lineIndent.startsWith(searchIndent)) {
+												return originalIndent + l.substring(searchIndent.length)
+											}
+											return l
+										})
+
+										contentLines.splice(i, searchLines.length, ...replaceWithIndent)
+										currentContent = contentLines.join('\n')
+										replacementCount++
+										found = true
+										break
+									}
+								}
+
+								if (!found) {
+									// 模糊匹配作为最后尝试
+									const fileLines = currentContent.split('\n')
+									const fuzzyResult = _findBestMatchText(fileLines, normalizedSearch)
+									if (fuzzyResult && fuzzyResult.similarity >= 0.70) {
+										currentContent = currentContent.replace(fuzzyResult.matchedText, block.replace)
+										replacementCount++
+									}
+								}
+							}
+
+							if (replacementCount > 0) {
+								await this.editCodeService.callBeforeApplyOrEdit({ from: 'ClickApply', uri })
+								this.editCodeService.instantlyRewriteFile({ uri, newContent: currentContent })
+								applySuccess = true
+							}
+						}
+					} catch (fallbackErr) {
+						lastError = fallbackErr instanceof Error ? fallbackErr : new Error(String(fallbackErr))
+					}
+				}
+
+				// ========== 4. 如果所有策略都失败，抛出明确错误 ==========
+				if (!applySuccess) {
+					const errorDetails = lastError?.message || 'Unknown error'
 					let suggestion = ''
 					if (errorDetails.toLowerCase().includes('not found') || errorDetails.toLowerCase().includes('no match')) {
 						suggestion = `\n\nSUGGESTION: The ORIGINAL section doesn't match the file content. Please:\n` +
@@ -1869,49 +2072,48 @@ export class ToolsService implements IToolsService {
 						suggestion = `\n\nSUGGESTION: Your ORIGINAL blocks overlap. Please:\n` +
 							`1. Make sure each block targets a different part of the file\n` +
 							`2. Or combine overlapping blocks into a single larger block`
+					} else if (errorDetails.toLowerCase().includes('not unique')) {
+						suggestion = `\n\nSUGGESTION: The ORIGINAL section matches multiple locations. Please:\n` +
+							`1. Include MORE context lines to make the match unique\n` +
+							`2. Include surrounding function names or unique identifiers`
 					}
-
-					throw new Error(
-						`Failed to apply edits: ${errorDetails}` + suggestion
-					)
+					throw new Error(`Failed to apply edits: ${errorDetails}` + suggestion)
 				}
 
-				// 6. 计算变更统计
-				await new Promise(resolve => setTimeout(resolve, 100)) // 等待100ms让diff系统更新
-				const diffStats = this.editCodeService.calculateDiffStats(uri)
-
+				// ========== 5. 计算变更统计（同步，不使用 delay） ==========
 				let changeStats: CodeChangeStats | undefined
+				const diffStats = this.editCodeService.calculateDiffStats(uri)
 				if (diffStats.linesAdded > 0 || diffStats.linesDeleted > 0) {
 					changeStats = { linesAdded: diffStats.linesAdded, linesRemoved: diffStats.linesDeleted }
 				} else {
-					// 从提取的 blocks 估算
 					let estimatedAdded = 0
 					let estimatedRemoved = 0
 					for (const block of blocks) {
-						const searchLines = (block.search || '').split('\n').filter(l => l.trim()).length
-						const replaceLines = (block.replace || '').split('\n').filter(l => l.trim()).length
-						if (replaceLines > searchLines) {
-							estimatedAdded += (replaceLines - searchLines)
-						} else if (searchLines > replaceLines) {
-							estimatedRemoved += (searchLines - replaceLines)
+						const searchLineCount = (block.search || '').split('\n').length
+						const replaceLineCount = (block.replace || '').split('\n').length
+						if (replaceLineCount > searchLineCount) {
+							estimatedAdded += (replaceLineCount - searchLineCount)
+						} else if (searchLineCount > replaceLineCount) {
+							estimatedRemoved += (searchLineCount - replaceLineCount)
 						}
-						// 至少显示有变化
-						if (estimatedAdded === 0 && estimatedRemoved === 0 && (searchLines > 0 || replaceLines > 0)) {
-							estimatedAdded = Math.max(1, replaceLines)
-							estimatedRemoved = Math.max(1, searchLines)
-						}
+					}
+					// 至少报告有修改
+					if (estimatedAdded === 0 && estimatedRemoved === 0) {
+						estimatedAdded = blocks.reduce((sum, b) => sum + (b.replace || '').split('\n').length, 0)
+						estimatedRemoved = blocks.reduce((sum, b) => sum + (b.search || '').split('\n').length, 0)
 					}
 					if (estimatedAdded > 0 || estimatedRemoved > 0) {
 						changeStats = { linesAdded: estimatedAdded, linesRemoved: estimatedRemoved }
 					}
 				}
-				// lint 错误检查在后台异步进行，不阻塞工具返回
-				const lintErrorsPromise = Promise.resolve().then(async () => {
-					await new Promise(resolve => setTimeout(resolve, 800)) // 增加等待时间到800ms，确保lint系统有时间更新
-					const { lintErrors } = this._getLintErrors(uri)
-					return lintErrors
+
+				// ========== 6. lint 错误异步获取 ==========
+				const lintErrorsPromise = new Promise<LintErrorItem[] | null>(resolve => {
+					setTimeout(() => {
+						resolve(this._getLintErrors(uri).lintErrors)
+					}, 500)
 				})
-				// 立即返回结果，lint错误异步更新
+
 				return {
 					result: (async () => {
 						const lintErrors = await lintErrorsPromise
@@ -2095,8 +2297,8 @@ export class ToolsService implements IToolsService {
 							console.error(`[fetch_url] ⚠️  Attempt ${attempt + 1}/3 failed: ${errorName} - ${errorMessage}`);
 
 							if (attempt < 2) {
-								// Wait before retrying
-								await new Promise(resolve => setTimeout(resolve, 1000));
+								// Exponential backoff: 300ms, 600ms
+								await new Promise(resolve => setTimeout(resolve, 300 * (attempt + 1)));
 							}
 						}
 					}
@@ -2433,7 +2635,6 @@ export class ToolsService implements IToolsService {
 			read_document: async ({ uri, startIndex, maxLength }) => {
 				try {
 					const filePath = uri.fsPath;
-					// Detect dynamic port
 					const documentReaderPort = await detectDocumentReaderPort();
 					const backendUrl = `http://localhost:${documentReaderPort}/`;
 					const requestBody = {
@@ -2442,38 +2643,27 @@ export class ToolsService implements IToolsService {
 						max_length: maxLength || 50000
 					};
 
-					// Retry logic to wait for backend server to start
+					// Reduced retries with exponential backoff (200ms, 500ms) instead of 5x1000ms
 					let lastError: any = null;
-					for (let attempt = 0; attempt < 5; attempt++) {
+					for (let attempt = 0; attempt < 3; attempt++) {
 						try {
 							const backendResponse = await fetch(backendUrl, {
 								method: 'POST',
 								mode: 'cors',
 								credentials: 'omit',
-								headers: {
-									'Content-Type': 'application/json',
-								},
+								headers: { 'Content-Type': 'application/json' },
 								body: JSON.stringify(requestBody),
-								signal: AbortSignal.timeout(60000), // 60 second timeout
+								signal: AbortSignal.timeout(60000),
 							});
 
 							if (!backendResponse.ok) {
 								const errorText = await backendResponse.text();
 								let errorData;
-								try {
-									errorData = JSON.parse(errorText);
-								} catch {
-									errorData = { error: errorText };
-								}
+								try { errorData = JSON.parse(errorText); } catch { errorData = { error: errorText }; }
 								return {
 									result: {
-										success: false,
-										content: '',
-										fileType: 'unknown',
-										pages: 0,
-										contentLength: 0,
-										hasMore: false,
-										nextIndex: 0,
+										success: false, content: '', fileType: 'unknown', pages: 0,
+										contentLength: 0, hasMore: false, nextIndex: 0,
 										startIndex: startIndex || 0,
 										error: errorData.error || `Backend service error: ${backendResponse.status}`,
 										suggestion: errorData.suggestion
@@ -2482,24 +2672,18 @@ export class ToolsService implements IToolsService {
 							}
 
 							const result = await backendResponse.json();
-
 							return {
 								result: {
-									success: true,
-									content: result.content,
-									fileType: result.fileType,
-									pages: result.pages,
-									contentLength: result.contentLength,
-									hasMore: result.hasMore,
-									nextIndex: result.nextIndex,
-									startIndex: result.startIndex,
-									metadata: result.metadata
+									success: true, content: result.content, fileType: result.fileType,
+									pages: result.pages, contentLength: result.contentLength,
+									hasMore: result.hasMore, nextIndex: result.nextIndex,
+									startIndex: result.startIndex, metadata: result.metadata
 								}
 							};
 						} catch (error) {
 							lastError = error;
-							if (attempt < 4) {
-								await new Promise(resolve => setTimeout(resolve, 1000));
+							if (attempt < 2) {
+								await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 200 : 500));
 							}
 						}
 					}
@@ -2539,35 +2723,26 @@ export class ToolsService implements IToolsService {
 						options: { backup: backup === true, replacements: replacements }
 					};
 
-					// Retry logic to wait for backend server to start
+					// Reduced retries with exponential backoff
 					let lastError: any = null;
-					for (let attempt = 0; attempt < 5; attempt++) {
+					for (let attempt = 0; attempt < 3; attempt++) {
 						try {
 							const backendResponse = await fetch(backendUrl, {
 								method: 'POST',
 								mode: 'cors',
 								credentials: 'omit',
-								headers: {
-									'Content-Type': 'application/json',
-								},
+								headers: { 'Content-Type': 'application/json' },
 								body: JSON.stringify(requestBody),
-								signal: AbortSignal.timeout(60000), // 60 second timeout
+								signal: AbortSignal.timeout(60000),
 							});
 
 							if (!backendResponse.ok) {
 								const errorText = await backendResponse.text();
 								let errorData;
-								try {
-									errorData = JSON.parse(errorText);
-								} catch {
-									errorData = { error: errorText };
-								}
+								try { errorData = JSON.parse(errorText); } catch { errorData = { error: errorText }; }
 								return {
 									result: {
-										success: false,
-										filePath: filePath,
-										fileType: 'unknown',
-										size: 0,
+										success: false, filePath: filePath, fileType: 'unknown', size: 0,
 										error: errorData.error || `Backend service error: ${backendResponse.status}`,
 										suggestion: errorData.suggestion
 									}
@@ -2577,26 +2752,19 @@ export class ToolsService implements IToolsService {
 							const result = await backendResponse.json();
 
 							// Notify document service to refresh the UI if document is open
-							try {
-								this.documentService.notifyDocumentModified(filePath);
-							} catch (e) {
-								console.log('[ToolsService] Document refresh notification sent');
-							}
+							try { this.documentService.notifyDocumentModified(filePath); } catch { /* ignore */ }
 
 							return {
 								result: {
-									success: true,
-									filePath: result.filePath,
-									fileType: result.fileType,
-									size: result.size,
-									sheets: result.sheets,
+									success: true, filePath: result.filePath, fileType: result.fileType,
+									size: result.size, sheets: result.sheets,
 									backupPath: backup ? filePath + '.backup' : undefined
 								}
 							};
 						} catch (error) {
 							lastError = error;
-							if (attempt < 4) {
-								await new Promise(resolve => setTimeout(resolve, 1000));
+							if (attempt < 2) {
+								await new Promise(resolve => setTimeout(resolve, attempt === 0 ? 200 : 500));
 							}
 						}
 					}
@@ -2614,61 +2782,8 @@ export class ToolsService implements IToolsService {
 					const endpoint = type === 'word' ? '/create-word' : type === 'excel' ? '/create-excel' : '/create-ppt';
 					const backendUrl = `http://localhost:${documentReaderPort}${endpoint}`;
 
-					// 🔧 改进的 JSON 解析函数，与参数解析部分保持一致
-					const tryParseJsonFromString = (input: unknown): any | null => {
-						// 如果已经是对象，直接返回
-						if (input && typeof input === 'object') return input;
-						if (typeof input !== 'string') return null;
-
-						const trimmed = input.trim();
-						const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-						const baseCandidate = (fenceMatch ? fenceMatch[1] : trimmed).trim();
-						const normalizedCandidate = baseCandidate
-							.replace(/[""„‟]/g, '"')
-							.replace(/[''‚‛]/g, "'")
-							.replace(/：/g, ':')
-							.replace(/，/g, ',')
-							.replace(/,\s*([}\]])/g, '$1');
-
-						const attempt = (candidate: string): any | null => {
-							try {
-								return JSON.parse(candidate);
-							} catch {
-								return null;
-							}
-						};
-
-						let parsed = attempt(baseCandidate) || attempt(normalizedCandidate);
-						if (parsed && typeof parsed === 'object') return parsed;
-
-						const firstObj = normalizedCandidate.indexOf('{');
-						const lastObj = normalizedCandidate.lastIndexOf('}');
-						if (firstObj !== -1 && lastObj > firstObj) {
-							parsed = attempt(normalizedCandidate.slice(firstObj, lastObj + 1));
-							if (parsed && typeof parsed === 'object') return parsed;
-						}
-
-						const firstArr = normalizedCandidate.indexOf('[');
-						const lastArr = normalizedCandidate.lastIndexOf(']');
-						if (firstArr !== -1 && lastArr > firstArr) {
-							parsed = attempt(normalizedCandidate.slice(firstArr, lastArr + 1));
-							if (parsed && typeof parsed === 'object') return parsed;
-						}
-
-						// 🔧 尝试双重解析（如果是双重编码的 JSON 字符串）
-						if (normalizedCandidate.startsWith('"') && normalizedCandidate.endsWith('"')) {
-							const unescaped = attempt(normalizedCandidate);
-							if (typeof unescaped === 'string') {
-								const innerParsed = attempt(unescaped);
-								if (innerParsed && typeof innerParsed === 'object') return innerParsed;
-							}
-						}
-
-						return null;
-					};
-
-					const parsed = tryParseJsonFromString(document_data);
-					// 🔧 如果解析失败，记录警告
+					// 使用模块级共享的 JSON 解析函数（去重）
+					const parsed = _tryParseJsonFromString(document_data);
 					if (!parsed && typeof document_data === 'string') {
 						console.warn('[create_document executor] Failed to parse document_data, raw:', String(document_data).substring(0, 200));
 					}
