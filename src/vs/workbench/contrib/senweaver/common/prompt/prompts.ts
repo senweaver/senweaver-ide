@@ -1,4 +1,4 @@
-﻿/*--------------------------------------------------------------------------------------
+/*--------------------------------------------------------------------------------------
  *  Copyright 2025 Glass Devtools, Inc. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
@@ -1002,6 +1002,22 @@ ${directoryStr}
 		rules.push('NEVER say "I\'m going to use tool_name". Instead, describe at a high level what the tool will do (e.g., "Listing files in the src directory").')
 		rules.push(`Many tools only work if the user has a workspace open.`)
 		rules.push('ONLY USE AVAILABLE TOOLS: You can ONLY call tools that are listed in the "Available tools" section. Do NOT invent tools. If a tool you need does not exist, work around it using available tools or explain the limitation.')
+
+		// 渐进式探索策略（防止 context 溢出）
+		rules.push('📖 PROGRESSIVE EXPLORATION STRATEGY (CRITICAL):')
+		rules.push('Your context window is limited and precious. Follow this exploration pattern:')
+		rules.push('Step 1: ORIENT — Use directory tree (already provided), ls_dir, or get_dir_tree to understand project structure.')
+		rules.push('Step 2: SEARCH — Use search_for_files or search_pathnames_only to find relevant files by content or name patterns.')
+		rules.push('Step 3: READ SELECTIVELY — Use read_file to read ONLY the specific files you identified. For large files, use startLine/endLine to read only the relevant section.')
+		rules.push('Step 4: ACT — Make your changes with edit_file or rewrite_file.')
+		rules.push('')
+		rules.push('KEY RULES:')
+		rules.push('- NEVER read all files in a directory. Read files ONE BY ONE, only when needed for the current step.')
+		rules.push('- When given a folder reference, you receive ONLY the directory tree. Use read_file for specific files.')
+		rules.push('- Before reading a file, ask: "Do I NEED this file RIGHT NOW to complete my current step?" If not, skip it.')
+		rules.push('- For large files (500+ lines shown as head/tail excerpt): use read_file with startLine/endLine to read specific sections rather than the whole file.')
+		rules.push('- Prefer search_for_files to find relevant code INSTEAD of reading entire files one by one.')
+		rules.push('- Read key files first (package.json, README, entry points, config) to understand the project before diving deeper.')
 	} else {
 		rules.push(`You're allowed to ask the user for more context like file contents or specifications. If this comes up, tell them to reference files and folders by typing @.`)
 	}
@@ -1058,12 +1074,17 @@ ${directoryStr}
 		rules.push('- Ensure all imports resolve correctly between files')
 		rules.push('- Add basic error handling and logging')
 
-		// Execution speed (Windsurf-inspired: parallel thinking)
-		rules.push('SPEED: Think ahead. While reading a file, plan the edit. Minimize tool calls by gathering all needed context first. Batch related changes into one edit when possible.')
-		rules.push('EFFICIENCY: If you need to modify multiple files, read all files first, then edit them sequentially. Avoid read→edit→read→edit pattern.')
+		// Execution speed
+		rules.push('SPEED: Think ahead. While reading a file, plan the edit. Minimize unnecessary tool calls. Batch related changes into one edit when possible.')
+		rules.push('SMART READING: Read → Edit → Read → Edit (one file at a time). Do NOT pre-read ALL files upfront — this wastes context space.')
 
-		// Keep agent responses efficient
-		rules.push('EFFICIENCY: Minimize back-and-forth. Gather enough context first, then implement changes in as few edits as possible.')
+		// Context window management
+		rules.push('CONTEXT BUDGET: Your context window is shared across the entire conversation. Every file you read, every tool result, takes up space that cannot be recovered. Be strategic:')
+		rules.push('- Read ONLY files directly relevant to the current task step.')
+		rules.push('- For large files (500+ lines): read specific sections with startLine/endLine instead of the whole file.')
+		rules.push('- Use search_for_files to pinpoint relevant code instead of reading entire files.')
+		rules.push('- Avoid re-reading files you have already read in this conversation unless the file has been modified.')
+		rules.push('- When exploring a new codebase, read 2-3 key files max to get orientation, then use search for specifics.')
 	}
 
 	// Gather-specific behavior
@@ -1240,6 +1261,12 @@ export const readFile = async (fileService: IFileService, uri: URI, fileSizeLimi
 
 
 
+// 大文件智能截取阈值
+// 超过此行数的文件只展示头尾 + 元信息，agent 用 read_file(startLine, endLine) 按需读取中间部分
+const LARGE_FILE_LINE_THRESHOLD = 500
+const LARGE_FILE_HEAD_LINES = 200   // 保留头部行数
+const LARGE_FILE_TAIL_LINES = 100   // 保留尾部行数
+
 export const messageOfSelection = async (
 	s: StagingSelectionItem,
 	opts: {
@@ -1266,26 +1293,40 @@ export const messageOfSelection = async (
 	else if (s.type === 'File') {
 		const { val } = await readFile(opts.fileService, s.uri, DEFAULT_FILE_SIZE_LIMIT)
 
-		const innerVal = val
-		const content = val === null ? ''
-			: `${tripleTick[0]}${s.language}\n${innerVal}\n${tripleTick[1]}`
+		if (val === null) {
+			return `${s.uri.fsPath}:\n(file could not be read)`
+		}
 
-		const str = `${s.uri.fsPath}:\n${content}`
-		return str
+		const allLines = val.split('\n')
+		const totalLines = allLines.length
+
+		// 小文件直接展示全部内容；大文件智能截取头尾
+		if (totalLines <= LARGE_FILE_LINE_THRESHOLD) {
+			// 小文件：完整展示
+			const content = `${tripleTick[0]}${s.language}\n${val}\n${tripleTick[1]}`
+			return `${s.uri.fsPath}:\n${content}`
+		}
+		else {
+			// 大文件：只展示头部 + 尾部 + 文件元信息
+			// 助手需要中间部分时使用 read_file(startLine, endLine) 精确读取
+			const headContent = allLines.slice(0, LARGE_FILE_HEAD_LINES).join('\n')
+			const tailContent = allLines.slice(-LARGE_FILE_TAIL_LINES).join('\n')
+			const omittedLines = totalLines - LARGE_FILE_HEAD_LINES - LARGE_FILE_TAIL_LINES
+
+			const str = `${s.uri.fsPath} (${totalLines} lines total):\n`
+				+ `${tripleTick[0]}${s.language}\n${headContent}\n${tripleTick[1]}\n`
+				+ `\n... [${omittedLines} lines omitted (lines ${LARGE_FILE_HEAD_LINES + 1}-${totalLines - LARGE_FILE_TAIL_LINES}). Use read_file with startLine/endLine to read specific sections.] ...\n\n`
+				+ `${tripleTick[0]}${s.language}\n${tailContent}\n${tripleTick[1]}`
+			return str
+		}
 	}
 	else if (s.type === 'Folder') {
+		// 文件夹选择只提供目录结构，不预读任何文件内容
+		// 助手需要时通过 read_file 工具按需读取具体文件
 		const dirStr: string = await opts.directoryStrService.getDirectoryStrTool(s.uri)
-		const folderStructure = `${s.uri.fsPath} folder structure:${tripleTick[0]}\n${dirStr}\n${tripleTick[1]}`
+		const folderStructure = `${s.uri.fsPath} folder structure:\n${tripleTick[0]}\n${dirStr}\n${tripleTick[1]}`
 
-		const uris = await opts.directoryStrService.getAllURIsInDirectory(s.uri, { maxResults: opts.folderOpts.maxChildren })
-		const strOfFiles = await Promise.all(uris.map(async uri => {
-			const { val, truncated } = await readFile(opts.fileService, uri, opts.folderOpts.maxCharsPerFile)
-			const truncationStr = truncated ? `\n... file truncated ...` : ''
-			const content = val === null ? 'null' : `${tripleTick[0]}\n${val}${truncationStr}\n${tripleTick[1]}`
-			const str = `${uri.fsPath}:\n${content}`
-			return str
-		}))
-		const contentStr = [folderStructure, ...strOfFiles].join('\n\n')
+		const contentStr = `${folderStructure}\n\n(Directory structure only. Use read_file to read specific files as needed. Do NOT read all files at once.)`
 		return contentStr
 	}
 	else if (s.type === 'Terminal') {

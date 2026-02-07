@@ -1,4 +1,4 @@
-﻿/*--------------------------------------------------------------------------------------
+/*--------------------------------------------------------------------------------------
  *  Copyright 2025 Glass Devtools, Inc. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
@@ -56,15 +56,19 @@ export const SMART_CONTEXT_CONFIG = {
 
 	// ========== OpenCode Session Compaction 增强配置 ==========
 	// Token溢出检测阈值
-	OVERFLOW_THRESHOLD: 0.65,        // 65%时触发压缩（更早触发，避免超限）
+	OVERFLOW_THRESHOLD: 0.55,        // 55%时触发压缩（更早触发，留出更大的安全余量）
 
 	// 工具输出裁剪配置 (Prune)
 	PRUNE: {
-		PROTECT_TOKENS: 30000,       // 保护最近的token数量（降低以更激进裁剪）
-		MINIMUM_TOKENS: 30000,       // 最小裁剪量（提高裁剪力度）
-		PROTECT_RECENT_TURNS: 3,     // 保护最近N轮对话（增加保护范围）
+		PROTECT_TOKENS: 20000,       // 保护最近的token数量（降低以更积极裁剪）
+		MINIMUM_TOKENS: 15000,       // 最小裁剪量（降低门槛，使小量裁剪也能生效）
+		PROTECT_RECENT_TURNS: 3,     // 保护最近N轮对话
 		// 受保护的工具（输出不会被裁剪）
-		PROTECTED_TOOLS: ['read_file', 'search_for_files', 'get_dir_tree', 'search_pathnames_only'] as string[],
+		// 注意：read_file 和 get_dir_tree 不再被保护！它们产生最大的输出，
+		// 旧的读取结果应该被裁剪，助手可以在需要时重新读取
+		PROTECTED_TOOLS: ['search_pathnames_only'] as string[],
+		// 大输出裁剪阈值：超过此字符数的工具输出即使在保护轮次内也会被压缩
+		LARGE_OUTPUT_THRESHOLD: 50_000,  // 50K chars ≈ 12.5K tokens
 	},
 
 	// 模型Context限制（用于动态调整）
@@ -727,22 +731,38 @@ export class EnhancedContextManager {
 	}
 
 	/**
-	 * 智能裁剪工具输出（OpenCode Prune风格，但更智能）
+	 * 智能裁剪工具输出（增强版）
 	 *
 	 * 策略：
 	 * 1. 从后往前遍历，保护最近的对话
-	 * 2. 受保护的工具不被裁剪
+	 * 2. 受保护的工具不被裁剪（但大输出仍可能被压缩）
 	 * 3. 超过保护阈值的旧工具输出被标记为已裁剪
-	 * 4. 返回裁剪统计信息
+	 * 4. 即使在保护轮次内，超大的工具输出也会被压缩（防止单次读取撑爆 context）
+	 * 5. 返回裁剪统计信息
 	 */
 	pruneToolOutputs(messages: MessageInput[]): PruneResult {
 		const config = this.config.PRUNE;
+		const largeOutputThreshold = (config as any).LARGE_OUTPUT_THRESHOLD ?? 50_000;
 		let totalTokens = 0;
 		let prunedTokens = 0;
 		let prunedCount = 0;
 		let userTurns = 0;
 
-		// 从后往前遍历
+		// 第一遍：压缩所有超大的工具输出（即使在保护轮次内）
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg.role === 'tool' && msg.toolId && !this.compactionState.prunedToolIds.has(msg.toolId)) {
+				// 超大输出即使在保护轮次内也需要裁剪
+				if (msg.content.length > largeOutputThreshold) {
+					const tokens = this.tokenEstimator.estimate(msg.content);
+					prunedTokens += tokens;
+					prunedCount++;
+					this.compactionState.prunedToolIds.add(msg.toolId);
+				}
+			}
+		}
+
+		// 第二遍：标准裁剪逻辑（从后往前遍历）
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const msg = messages[i];
 
@@ -751,7 +771,7 @@ export class EnhancedContextManager {
 				userTurns++;
 			}
 
-			// 保护最近N轮对话
+			// 保护最近N轮对话（大输出已在第一遍中处理）
 			if (userTurns < config.PROTECT_RECENT_TURNS) {
 				continue;
 			}
@@ -781,7 +801,7 @@ export class EnhancedContextManager {
 			}
 		}
 
-		// 如果裁剪量不够最小阈值，不执行裁剪
+		// 如果裁剪量不够最小阈值，不执行裁剪（但大输出裁剪始终执行）
 		if (prunedTokens < config.MINIMUM_TOKENS) {
 			return {
 				prunedCount: 0,
@@ -795,7 +815,7 @@ export class EnhancedContextManager {
 		this.compactionState.compactionCount++;
 		this.compactionState.lastCompactionTime = Date.now();
 
-		console.log(`[SmartContext] ✅ Pruned ${prunedCount} tool outputs, saved ${prunedTokens.toLocaleString()} tokens`);
+		console.log(`[SmartContext] Pruned ${prunedCount} tool outputs, saved ${prunedTokens.toLocaleString()} tokens`);
 
 		return {
 			prunedCount,
@@ -812,11 +832,29 @@ export class EnhancedContextManager {
 	}
 
 	/**
-	 * 获取裁剪后的工具内容
+	 * 获取裁剪后的工具摘要内容
+	 * 不是简单地标记为"已删除"，而是提供有用的上下文提示
 	 */
-	getPrunedToolContent(toolName: string, originalTokens?: number): string {
-		const tokenInfo = originalTokens ? ` (original: ${originalTokens} tokens)` : '';
-		return `[Tool output pruned${tokenInfo} - ${toolName} result was compacted to save context space]`;
+	getPrunedToolContent(toolName: string, originalContent?: string): string {
+		// 根据工具类型生成不同的摘要
+		if (toolName === 'read_file' && originalContent) {
+			const lines = originalContent.split('\n')
+			const filePath = lines[0] || 'unknown file'
+			return `[Previously read: ${filePath} (${lines.length} lines) - content pruned. Use read_file to re-read if needed.]`
+		}
+		if (toolName === 'search_for_files' || toolName === 'search_pathnames_only') {
+			return `[Previous search results pruned. Re-run search if needed.]`
+		}
+		if (toolName === 'run_command') {
+			return `[Previous command output pruned.]`
+		}
+		if (toolName === 'ls_dir' || toolName === 'get_dir_tree') {
+			return `[Previous directory listing pruned. Use ls_dir to re-list if needed.]`
+		}
+		if (toolName === 'edit_file' || toolName === 'rewrite_file') {
+			return `[Previous edit result - change was applied successfully.]`
+		}
+		return `[${toolName} output pruned to save context space.]`
 	}
 
 	/**

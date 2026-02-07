@@ -1,4 +1,4 @@
-﻿import { Disposable } from '../../../../base/common/lifecycle.js';
+import { Disposable } from '../../../../base/common/lifecycle.js';
 import { deepClone } from '../../../../base/common/objects.js';
 import { IModelService } from '../../../../editor/common/services/model.js';
 import { registerSingleton, InstantiationType } from '../../../../platform/instantiation/common/extensions.js';
@@ -43,8 +43,10 @@ type SimpleLLMMessage = {
 
 
 
-const CHARS_PER_TOKEN = 4 // assume abysmal chars per token
-const TRIM_TO_LEN = 500 // 增加裁剪后保留的长度，保持更多上下文
+// 更精确的 token 估算：3.5 chars/token（针对中英混合文本）
+// 之前用 4 会低估 token 使用量约 14%，导致发送时超限
+const CHARS_PER_TOKEN = 3.5
+const TRIM_TO_LEN = 500 // 裁剪后保留的长度
 
 
 
@@ -399,6 +401,38 @@ const prepareOpenAIOrAnthropicMessages = ({
 			remainingCharsToTrim -= numCharsWillTrim
 			m.content = m.content.substring(0, TRIM_TO_LEN - '...'.length) + '...'
 			alreadyTrimmedIdxes.add(trimIdx)
+		}
+	}
+
+	// ================ 第三阶段：最终安全检查 ================
+	// 再次检查总大小，如果第二阶段裁剪后仍然过大，进行紧急裁剪
+	let finalTotalLen = 0
+	for (const m of messages) { finalTotalLen += m.content.length }
+
+	const SAFETY_MARGIN = 0.9 // 留 10% 安全余量
+	const safeInputChars = availableInputChars * SAFETY_MARGIN
+
+	if (finalTotalLen > safeInputChars) {
+		// 紧急裁剪：按比例缩减所有非 system/最近消息
+		const excessRatio = safeInputChars / finalTotalLen
+		const EMERGENCY_KEEP_CHARS = 200 // 紧急模式下每条消息最少保留的字符数
+
+		for (let idx = 1; idx < messages.length - 2; idx++) {
+			const m = messages[idx]
+			if (m.role === 'system') continue
+			const targetLen = Math.max(EMERGENCY_KEEP_CHARS, Math.floor(m.content.length * excessRatio))
+			if (m.content.length > targetLen) {
+				m.content = m.content.substring(0, targetLen - 30) + '\n...[emergency truncation]...'
+			}
+		}
+
+		// 如果还是太大，只保留 system + 最近 5 条消息
+		let recheckLen = 0
+		for (const m of messages) { recheckLen += m.content.length }
+		if (recheckLen > safeInputChars && messages.length > 6) {
+			const keepStart = messages.slice(0, 1) // system
+			const keepEnd = messages.slice(-5)      // 最近 5 条
+			messages = [...keepStart, ...keepEnd]
 		}
 	}
 
@@ -814,28 +848,87 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 	}
 
 	/**
-	 * 智能压缩历史消息（类似 Cursor 的方式）
+	 * 智能压缩历史消息
 	 * 保留最近的消息，压缩较旧的消息
 	 */
+	/**
+	 * 智能历史消息压缩
+	 *
+	 * 核心思路：压缩不是简单的截断，而是提取有用的语义摘要
+	 * - read_file → 保留文件路径 + 行数 + 导出/函数/类的名称列表
+	 * - edit_file / rewrite_file → 保留操作描述
+	 * - search → 保留搜索结果文件列表
+	 * - 其他 → 保留开头 + 结尾
+	 */
 	private _compressHistoryMessage(content: string, role: 'assistant' | 'tool' | 'user', toolName?: string): string {
-		const MAX_COMPRESSED_LENGTH = 300 // 压缩后最大长度
+		const MAX_COMPRESSED_LENGTH = 500 // 保留更多上下文（500 chars vs 300）
 
 		if (role === 'user') {
-			// 用户消息：如果太长，保留开头和结尾
 			if (content.length <= MAX_COMPRESSED_LENGTH) return content
-			const half = Math.floor(MAX_COMPRESSED_LENGTH / 2)
-			return content.slice(0, half) + '\n...[message truncated]...\n' + content.slice(-half)
+			// 用户消息：保留头尾，因为用户的指令通常在头部，选择的文件名在尾部
+			const headLen = Math.floor(MAX_COMPRESSED_LENGTH * 0.6)
+			const tailLen = Math.floor(MAX_COMPRESSED_LENGTH * 0.3)
+			return content.slice(0, headLen) + '\n...[message truncated]...\n' + content.slice(-tailLen)
 		}
 
 		if (role === 'tool') {
-			// 工具调用结果：只保留摘要
 			if (content.length <= MAX_COMPRESSED_LENGTH) return content
 
-			// 特殊处理：如果是文件内容，只保留文件路径和行数
-			if (toolName === 'read_file' || toolName === 'list_dir' || toolName === 'glob') {
+			// read_file: 语义摘要 — 保留文件路径 + 行数 + 提取关键标识符
+			if (toolName === 'read_file') {
 				const lines = content.split('\n')
+				const filePath = lines[0] || '' // 第一行通常是文件路径
+
+				// 提取关键代码标识符（export, function, class, interface, const/let 导出）
+				const keyIdentifiers: string[] = []
+				for (const line of lines) {
+					// export declarations
+					const exportMatch = line.match(/^export\s+(?:default\s+)?(?:function|class|interface|type|const|let|var|enum|abstract)\s+(\w+)/);
+					if (exportMatch) { keyIdentifiers.push(exportMatch[1]); continue }
+					// function/class declarations
+					const declMatch = line.match(/^(?:async\s+)?(?:function|class|interface)\s+(\w+)/);
+					if (declMatch) { keyIdentifiers.push(declMatch[1]); continue }
+					// React component
+					const reactMatch = line.match(/^(?:export\s+)?(?:const|function)\s+(\w+)\s*[=:]\s*(?:\(|React)/);
+					if (reactMatch) { keyIdentifiers.push(reactMatch[1]); continue }
+
+					if (keyIdentifiers.length >= 20) break // 最多提取 20 个标识符
+				}
+
+				const identifierStr = keyIdentifiers.length > 0
+					? `\nKey identifiers: ${keyIdentifiers.join(', ')}`
+					: ''
+				return `[Previously read] ${filePath} (${lines.length} lines)${identifierStr}\n(Use read_file to re-read if needed)`
+			}
+
+			// search_for_files / search_pathnames_only: 保留文件列表
+			if (toolName === 'search_for_files' || toolName === 'search_pathnames_only') {
+				const lines = content.split('\n').filter(l => l.trim())
 				if (lines.length > 10) {
-					return `${lines.slice(0, 5).join('\n')}\n...[${lines.length - 10} lines omitted]...\n${lines.slice(-5).join('\n')}`
+					return `[Search results: ${lines.length} files]\n${lines.slice(0, 8).join('\n')}\n... and ${lines.length - 8} more files`
+				}
+				return content
+			}
+
+			// ls_dir / get_dir_tree: 保留目录结构的前几行
+			if (toolName === 'ls_dir' || toolName === 'get_dir_tree') {
+				const lines = content.split('\n')
+				if (lines.length > 15) {
+					return `${lines.slice(0, 12).join('\n')}\n... [${lines.length - 12} more entries]`
+				}
+				return content
+			}
+
+			// edit_file / rewrite_file: 这些结果通常很短，保留完整
+			if (toolName === 'edit_file' || toolName === 'rewrite_file' || toolName === 'create_file_or_folder') {
+				return content.slice(0, MAX_COMPRESSED_LENGTH)
+			}
+
+			// run_command: 保留头尾（命令输出首尾通常最有用）
+			if (toolName === 'run_command') {
+				const lines = content.split('\n')
+				if (lines.length > 20) {
+					return `${lines.slice(0, 8).join('\n')}\n...[${lines.length - 16} lines omitted]...\n${lines.slice(-8).join('\n')}`
 				}
 			}
 
@@ -844,21 +937,18 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		}
 
 		if (role === 'assistant') {
-			// Assistant 消息：保留开头和关键信息
 			if (content.length <= MAX_COMPRESSED_LENGTH) return content
 
-			// 尝试提取代码块标题
-			const codeBlockMatches = content.match(/```[\w]*\n/g)
-			const hasCode = codeBlockMatches && codeBlockMatches.length > 0
-
+			// Assistant 消息：保留开头部分作为摘要
 			let summary = content.slice(0, MAX_COMPRESSED_LENGTH)
-			if (hasCode) {
-				summary += `\n...[contains ${codeBlockMatches.length} code block(s), truncated]...`
-			} else {
-				summary += '\n...[message truncated]...'
+			// 尝试在句子或段落边界截断
+			const lastPeriod = summary.lastIndexOf('。')
+			const lastNewline = summary.lastIndexOf('\n')
+			const cutAt = Math.max(lastPeriod, lastNewline)
+			if (cutAt > MAX_COMPRESSED_LENGTH * 0.5) {
+				summary = summary.slice(0, cutAt + 1)
 			}
-
-			return summary
+			return summary + '\n...[response truncated]...'
 		}
 
 		return content
@@ -869,7 +959,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const isDesigner = chatMode === 'designer';
 		const total = chatMessages.length;
 
-		// ========== 智能压缩配置（类似 Cursor） ==========
+		// ========== 智能压缩配置 ==========
 		// 保留最近的 N 条完整消息，压缩更早的消息
 		const KEEP_RECENT_COUNT = 10 // 保留最近 10 条完整消息
 		const shouldCompress = (index: number) => {
@@ -918,9 +1008,9 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			else if (m.role === 'tool') {
 				let content = m.content;
 
-				// 智能上下文管理: 检查工具输出是否已被裁剪
+				// 智能上下文管理: 检查工具输出是否已被裁剪（传入原始内容用于生成语义摘要）
 				if (enhancedContextManager.isToolPruned(m.id)) {
-					content = enhancedContextManager.getPrunedToolContent(m.name);
+					content = enhancedContextManager.getPrunedToolContent(m.name, m.content);
 				}
 				// 如果不是最近的工具调用，进行压缩
 				else if (shouldCompress(i)) {
