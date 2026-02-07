@@ -343,7 +343,7 @@ export interface IDefineKeybindingEditorContribution extends IEditorContribution
 	showDefineKeybindingWidget(): void;
 }
 
-export const FOLDER_SETTINGS_PATH = '.vscode/settings.json';
+export const FOLDER_SETTINGS_PATH = '.senweaver/settings.json';
 export const DEFAULT_SETTINGS_EDITOR_SETTING = 'workbench.settings.openDefaultSettings';
 export const USE_SPLIT_JSON_SETTING = 'workbench.settings.useSplitJSON';
 
