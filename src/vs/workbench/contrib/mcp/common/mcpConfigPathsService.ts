@@ -141,7 +141,7 @@ export class McpConfigPathsService extends Disposable implements IMcpConfigPaths
 			id: `wf${workspaceFolder.index}`,
 			key: 'workspaceFolderValue',
 			target: ConfigurationTarget.WORKSPACE_FOLDER,
-			label: `${workspaceFolder.name}/.vscode/mcp.json`,
+			label: `${workspaceFolder.name}/.senweaver/mcp.json`,
 			scope: StorageScope.WORKSPACE,
 			remoteAuthority: this._environmentService.remoteAuthority,
 			order: McpCollectionSortOrder.WorkspaceFolder,

@@ -919,7 +919,7 @@ const _commonFileExtensions = new Set([
 	'.lock', '.map', '.d.ts', '.config.js', '.config.ts',
 	'.gitignore', '.npmrc', '.nvmrc', '.editorconfig',
 ])
-const _dotFolders = new Set(['.git', '.vscode', '.idea', '.github', '.husky', '.config', '.cache', '.next', '.nuxt'])
+const _dotFolders = new Set(['.git', '.senweaver', '.vscode', '.idea', '.github', '.husky', '.config', '.cache', '.next', '.nuxt'])
 const _folderPatterns = new Set(['src', 'lib', 'dist', 'build', 'public', 'assets', 'components', 'pages', 'styles', 'utils', 'hooks', 'types', 'api', 'services', 'store', 'config', 'test', 'tests', 'spec', 'docs', 'scripts', 'bin', 'node_modules', 'vendor', 'frontend', 'backend', 'home'])
 const _alphaNumRegex = /^[a-zA-Z0-9]+$/
 

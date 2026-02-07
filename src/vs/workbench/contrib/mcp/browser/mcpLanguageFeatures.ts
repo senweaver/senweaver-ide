@@ -41,7 +41,7 @@ export class McpLanguageFeatures extends Disposable implements IWorkbenchContrib
 		super();
 
 		const patterns = [
-			{ pattern: '**/.vscode/mcp.json' },
+			{ pattern: '**/.senweaver/mcp.json' },
 			{ pattern: '**/settings.json' },
 			{ pattern: '**/workspace.json' },
 		];
