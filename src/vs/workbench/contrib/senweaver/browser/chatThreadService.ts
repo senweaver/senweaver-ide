@@ -1,4 +1,4 @@
-﻿/*--------------------------------------------------------------------------------------
+/*--------------------------------------------------------------------------------------
  *  Copyright 2025 Glass Devtools, Inc. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
@@ -1213,7 +1213,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			debugThinkingLog('2. Get chat messages', tAfterGetMessages - tAfterSetState, { messageCount: chatMessages.length })
 
 			// 响应式限流：不预等待，只检查是否在 429 错误冷却期内
-			// 参考 Cursor 的做法：宁可偶尔触发 429 重试，也不要让用户长时间等待
+			// 宁可偶尔触发 429 重试，也不要让用户长时间等待
 			const tBeforeTPMCheck = perfNow()
 			let tpmCooldownWait = 0
 			if (modelSelection) {
@@ -1412,6 +1412,66 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					const { error } = llmRes
 					const isRateLimitError = tpmRateLimiter.isRateLimitError(error)
 
+					// 检测 context length 超限错误 (400: maximum context length exceeded)
+					const fullErrorStr = JSON.stringify(error).toLowerCase()
+					const isContextLengthError = fullErrorStr.includes('context_length') ||
+						fullErrorStr.includes('context length') ||
+						fullErrorStr.includes('maximum context') ||
+						fullErrorStr.includes('token limit') ||
+						fullErrorStr.includes('too many tokens') ||
+						fullErrorStr.includes('max_tokens') ||
+						fullErrorStr.includes('input is too long') ||
+						(fullErrorStr.includes('400') && (fullErrorStr.includes('token') || fullErrorStr.includes('length')))
+
+					// Context Length 错误：积极裁剪上下文后重试
+					if (isContextLengthError) {
+						console.warn('[ChatThread] Context length exceeded, aggressively pruning and retrying...')
+
+						// 强制执行积极裁剪：清除所有非最近轮次的工具输出
+						const toolMessages = chatMessages.filter(m => m.role === 'tool')
+						for (const toolMsg of toolMessages) {
+							if (!enhancedContextManager.isToolPruned(toolMsg.id)) {
+								enhancedContextManager['compactionState'].prunedToolIds.add(toolMsg.id)
+							}
+						}
+
+						// 最多重试 2 次 context length 错误
+						if (nAttempts <= 2) {
+							shouldRetryLLM = true
+							// 重新准备消息（这次裁剪过的工具输出会被替换为摘要）
+							try {
+								prepResult = await this._convertToLLMMessagesService.prepareLLMChatMessages({
+									chatMessages,
+									modelSelection,
+									chatMode
+								})
+							} catch (retryError) {
+								this._setStreamState(threadId, { isRunning: undefined, error: { message: 'Context too large even after pruning. Please start a new conversation.', fullError: retryError instanceof Error ? retryError : null } })
+								return
+							}
+
+							this._setStreamState(threadId, {
+								isRunning: 'LLM',
+								llmInfo: {
+									displayContentSoFar: this.streamState[threadId]?.llmInfo?.displayContentSoFar || '',
+									reasoningSoFar: (this.streamState[threadId]?.llmInfo?.reasoningSoFar || '') + `\n[Context too large, compressing history and retrying...]`,
+									toolCallSoFar: null
+								},
+								interrupt: Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) })
+							})
+							continue // 用裁剪后的消息重试
+						}
+						else {
+							// 裁剪后仍然超限，提示用户开始新对话
+							this._setStreamState(threadId, {
+								isRunning: undefined,
+								error: { message: 'The conversation context is too large. Please start a new conversation or reduce the number of selected files/folders.', fullError: error instanceof Error ? error : null }
+							})
+							this._addUserCheckpoint({ threadId })
+							return
+						}
+					}
+
 					// 响应式限流：只在收到 429 错误时才进行限流
 					if (isRateLimitError && modelSelection) {
 						// 使用新的 handleRateLimitError 方法，它会从 API 响应中提取 retry-after
@@ -1492,7 +1552,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					const mcpTool = mcpTools?.find(t => t.name === toolCall.name)
 
 					// 优化：在工具调用执行时并行预热系统消息和目录字符串缓存
-					// 这是参考 Cursor 的做法：在工具执行期间就开始准备下一次可能需要的资源
+					// 在工具执行期间就开始准备下一次可能需要的资源
 					// 系统消息和目录字符串的获取可以并行执行，不依赖于工具结果
 					const systemMessageWarmupPromise = (async () => {
 						try {

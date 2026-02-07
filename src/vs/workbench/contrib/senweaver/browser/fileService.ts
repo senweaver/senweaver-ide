@@ -1,4 +1,4 @@
-﻿import { localize2 } from '../../../../nls.js';
+import { localize2 } from '../../../../nls.js';
 import { URI } from '../../../../base/common/uri.js';
 import { Action2, registerAction2, MenuId } from '../../../../platform/actions/common/actions.js';
 import { ServicesAccessor } from '../../../../editor/browser/editorExtensions.js';

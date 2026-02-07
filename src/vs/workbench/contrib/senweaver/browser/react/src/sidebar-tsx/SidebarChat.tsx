@@ -1,4 +1,4 @@
-﻿/*--------------------------------------------------------------------------------------
+/*--------------------------------------------------------------------------------------
  *  Copyright 2025 Glass Devtools, Inc. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
@@ -2093,7 +2093,7 @@ const ReasoningWrapper = ({ isDoneReasoning, isStreaming, children }: { isDoneRe
 	const contentRef = useRef<HTMLDivElement>(null)
 	const [shouldAutoCollapse, setShouldAutoCollapse] = useState(false)
 
-	// 最大高度限制（类似 Cursor，超过后自动收起）
+	// 最大高度限制（超过后自动收起）
 	const MAX_REASONING_HEIGHT = 200 // px
 
 	useEffect(() => {
