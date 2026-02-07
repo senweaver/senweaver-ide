@@ -407,7 +407,7 @@ export class McpAddConfigurationCommand {
 		const writeToUriDirect = this._explicitConfigUri
 			? URI.parse(this._explicitConfigUri)
 			: target === ConfigurationTarget.WORKSPACE && workspace.folders.length === 1
-				? URI.joinPath(workspace.folders[0].uri, '.vscode', 'mcp.json')
+				? URI.joinPath(workspace.folders[0].uri, '.senweaver', 'mcp.json')
 				: undefined;
 
 		if (writeToUriDirect) {
