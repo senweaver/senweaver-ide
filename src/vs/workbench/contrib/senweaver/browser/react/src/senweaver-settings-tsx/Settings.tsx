@@ -1,4 +1,4 @@
-﻿/*--------------------------------------------------------------------------------------
+/*--------------------------------------------------------------------------------------
  *  Copyright 2025 Glass Devtools, Inc. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
@@ -7,7 +7,7 @@ import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react'
 import { ProviderName, SettingName, displayInfoOfSettingName, providerNames, SenweaverStatefulModelInfo, customSettingNamesOfProvider, RefreshableProviderName, refreshableProviderNames, displayInfoOfProviderName, nonlocalProviderNames, localProviderNames, GlobalSettingName, featureNames, displayInfoOfFeatureName, isProviderNameDisabled, FeatureName, hasDownloadButtonsOnModelsProviderNames, subTextMdOfProviderName } from '../../../../common/senweaverSettingsTypes.js'
 import ErrorBoundary from '../sidebar-tsx/ErrorBoundary.js'
 import { SenweaverButtonBgDarken, SenweaverCustomDropdownBox, SenweaverInputBox2, SenweaverSimpleInputBox, SenweaverSwitch } from '../util/inputs.js'
-import { useAccessor, useIsDark, useIsOptedOut, useRefreshModelListener, useRefreshModelState, useSettingsState } from '../util/services.js'
+import { useAccessor, useIsDark, useIsOptedOut, useRefreshModelListener, useRefreshModelState, useSettingsState, useRemoteCollaborationState } from '../util/services.js'
 import { X, RefreshCw, Loader2, Check, Plus, Cloud, Settings as SettingsIcon } from 'lucide-react'
 import { URI } from '../../../../../../../base/common/uri.js'
 import { ModelDropdown } from './ModelDropdown.js'
@@ -1279,11 +1279,196 @@ const SkillsList = () => {
 	);
 };
 
-export const Settings = () => {
+// ==================== 远程协作设置面板 ====================
+
+const RemoteCollaboration = () => {
+	const accessor = useAccessor()
+	const remoteService = accessor.get('IRemoteCollaborationService')
+	const { connectionStatus, connectedPeers, deviceCode, acceptingConnections } = useRemoteCollaborationState()
+
+	const [hint, setHint] = useState<{ message: string; isError: boolean } | null>(null)
+	const [longCodeVisible, setLongCodeVisible] = useState(false)
+
+	// 生成验证码
+	const longTermCode = useMemo(() => {
+		const storageKey = 'senweaver.user.id'
+		const userId = localStorage.getItem(storageKey) || ''
+		let hash = 0
+		for (let i = 0; i < userId.length; i++) {
+			const char = userId.charCodeAt(i)
+			hash = ((hash << 7) - hash) + char
+			hash = hash & hash
+		}
+		const positiveHash = Math.abs(hash)
+		const longCode = (positiveHash % 900000000000) + 100000000000
+		return longCode.toString()
+	}, [])
+
+	const showHint = useCallback((message: string, isError = false) => {
+		setHint({ message, isError })
+		setTimeout(() => setHint(null), 5000)
+	}, [])
+
+	const handleCopy = useCallback(() => {
+		navigator.clipboard.writeText(deviceCode).then(() => {
+			showHint('设备码已复制', false)
+		})
+	}, [deviceCode, showHint])
+
+	const handleToggleAccepting = useCallback(() => {
+		const newState = !acceptingConnections
+		remoteService.setAcceptingConnections(newState)
+		if (newState) {
+			showHint('远程连接已开启，App 可以通过设备码连接', false)
+		} else {
+			showHint('远程连接已关闭，所有连接已断开', false)
+		}
+	}, [acceptingConnections, remoteService, showHint])
+
+	const handleDisconnect = useCallback(() => {
+		remoteService.disconnectAll()
+		showHint('已断开连接', false)
+	}, [remoteService, showHint])
+
+	const statusInfo = useMemo(() => {
+		if (!acceptingConnections) {
+			return { color: 'bg-gray-500', text: '已关闭' }
+		}
+		switch (connectionStatus) {
+			case 'connected': return { color: 'bg-green-400', text: '已连接' }
+			case 'connecting': return { color: 'bg-yellow-400', text: '连接中...' }
+			case 'error': return { color: 'bg-red-400', text: '连接错误' }
+			default: return { color: 'bg-blue-400 animate-pulse', text: '等待 App 连接...' }
+		}
+	}, [connectionStatus, acceptingConnections])
+
+	return (
+		<div className="space-y-6">
+			{/* 说明 */}
+			<div className="p-3 rounded-md bg-white/5 text-senweaver-fg-3 text-sm leading-relaxed space-y-1.5">
+				<p>远程 App 通过 WebRTC P2P 连接到本 IDE，可以在 App 端直接向 AI 助手发送提问。IDE 本地处理请求后，异步将聊天界面数据推送给 App 进行渲染，不影响 IDE 本地的任何操作和性能。</p>
+				<p className="text-xs text-senweaver-fg-3/70">连接方式：开启远程连接后，将设备码提供给 App 端输入即可连接。每个 IDE 仅允许一台 App 同时连接。</p>
+			</div>
+
+			{/* 开启/关闭开关 + 状态 */}
+			<div className="flex items-center justify-between p-4 rounded-md border border-white/10 bg-white/[0.03]">
+				<div className="flex items-center gap-3">
+					<span className={`w-2.5 h-2.5 rounded-full ${statusInfo.color}`} />
+					<div>
+						<div className="text-sm font-medium text-senweaver-fg-1">远程连接</div>
+						<div className="text-xs text-senweaver-fg-3">{statusInfo.text}</div>
+					</div>
+				</div>
+				<SenweaverSwitch
+					value={acceptingConnections}
+					onChange={handleToggleAccepting}
+					size="xs"
+				/>
+			</div>
+
+			{/* 提示信息 */}
+			{hint && (
+				<div className={`text-xs ${hint.isError ? 'text-red-400' : 'text-green-400'}`}>
+					{hint.message}
+				</div>
+			)}
+
+			{/* 开启后显示的内容 */}
+			{acceptingConnections && (
+				<>
+					{/* 本 IDE 设备信息（供 App 端输入连接） */}
+					<div className="p-4 rounded-md border border-white/10 bg-white/[0.03] space-y-3">
+						<h3 className="text-base font-semibold text-senweaver-fg-1">本 IDE 设备信息</h3>
+						<p className="text-xs text-senweaver-fg-3">将以下设备码提供给远程 App，App 端输入后即可连接到本 IDE。</p>
+
+						{/* 设备码 */}
+						<div className="flex items-center gap-3">
+							<span className="text-sm text-senweaver-fg-3 w-16 shrink-0">设备码</span>
+							<div className="flex-1 font-mono text-lg font-bold tracking-widest text-blue-400 bg-black/20 rounded px-3 py-1.5 border border-white/10">
+								{deviceCode}
+							</div>
+							<button
+								onClick={handleCopy}
+								className="px-3 py-1.5 text-xs rounded border border-white/10 text-senweaver-fg-2 hover:bg-white/10 transition-colors"
+							>
+								复制
+							</button>
+						</div>
+
+						{/* 设备名 */}
+						<div className="flex items-center gap-3">
+							<span className="text-sm text-senweaver-fg-3 w-16 shrink-0">设备名</span>
+							<span className="text-sm text-senweaver-fg-2">{remoteService.deviceName}</span>
+						</div>
+
+						{/* 验证码 */}
+						<div className="flex items-center gap-3">
+							<span className="text-sm text-senweaver-fg-3 w-16 shrink-0">验证码</span>
+							<div className="flex-1 font-mono text-sm bg-black/20 rounded px-3 py-1.5 border border-white/10 text-senweaver-fg-2">
+								{longCodeVisible ? longTermCode : '•'.repeat(longTermCode.length)}
+							</div>
+							<button
+								onClick={() => setLongCodeVisible(!longCodeVisible)}
+								className="px-3 py-1.5 text-xs rounded border border-white/10 text-senweaver-fg-2 hover:bg-white/10 transition-colors"
+							>
+								{longCodeVisible ? '隐藏' : '显示'}
+							</button>
+						</div>
+					</div>
+
+					{/* 已连接的 App */}
+					<div className="space-y-3">
+						<h3 className="text-base font-semibold text-senweaver-fg-1">已连接的 App</h3>
+
+						{connectedPeers.length === 0 ? (
+							<div className="text-center text-senweaver-fg-3 text-sm py-6 border border-dashed border-white/10 rounded-md">
+								等待 App 连接中...请在远程 App 中输入上方设备码
+							</div>
+						) : (
+							<div className="space-y-2">
+								{connectedPeers.slice(0, 1).map(peer => (
+									<div key={peer.peerId} className="flex items-center justify-between p-3 rounded-md border border-green-500/20 bg-green-500/5">
+										<div className="flex items-center gap-3">
+											<span className={`w-2 h-2 rounded-full ${peer.status === 'online' ? 'bg-green-400' : 'bg-gray-400'}`} />
+											<div>
+												<div className="text-sm text-senweaver-fg-1">{peer.deviceName}</div>
+												<div className="text-xs text-senweaver-fg-3 font-mono">
+													设备码: {peer.deviceCode}
+												</div>
+												<div className="text-xs text-senweaver-fg-3">
+													连接于 {new Date(peer.connectedAt).toLocaleTimeString()}
+												</div>
+											</div>
+										</div>
+										<button
+											onClick={handleDisconnect}
+											className="px-3 py-1.5 text-xs rounded border border-red-400/50 text-red-400 hover:bg-red-400/10 transition-colors"
+										>
+											断开连接
+										</button>
+									</div>
+								))}
+							</div>
+						)}
+					</div>
+				</>
+			)}
+
+			{/* 关闭时的提示 */}
+			{!acceptingConnections && (
+				<div className="text-center text-senweaver-fg-3 text-sm py-4">
+					开启远程连接后，App 可以通过设备码连接到本 IDE
+				</div>
+			)}
+		</div>
+	)
+}
+
+export const Settings = ({ initialTab }: { initialTab?: Tab }) => {
 	const isDark = useIsDark()
 	// ─── sidebar nav ──────────────────────────
 	const [selectedSection, setSelectedSection] =
-		useState<Tab>('models');
+		useState<Tab>(initialTab || 'models');
 
 	const navItems: { tab: Tab; label: string }[] = [
 		{ tab: 'models', label: '模型' },
@@ -1294,6 +1479,7 @@ export const Settings = () => {
 		{ tab: 'customApi', label: 'API' },
 		{ tab: 'mcp', label: 'MCP' },
 		{ tab: 'skills', label: 'Skills' },
+		{ tab: 'remoteCollaboration', label: '远程协作' },
 		{ tab: 'all', label: '所有设置' },
 		{ tab: 'aboutUpdate', label: '关于更新' },
 	];
@@ -1869,12 +2055,20 @@ Skills 是可复用的专业指令，帮助 AI 执行特定任务（如代码审
 								</ErrorBoundary>
 							</div>
 
-							{/* About Update section */}
-							<div className={shouldShowTab('aboutUpdate') ? `` : 'hidden'}>
-								<ErrorBoundary>
-									<AboutUpdate />
-								</ErrorBoundary>
-							</div>
+						{/* Remote Collaboration section */}
+						<div className={shouldShowTab('remoteCollaboration') ? `` : 'hidden'}>
+							<ErrorBoundary>
+								<h2 className='text-3xl mb-2'>远程协作</h2>
+								<RemoteCollaboration />
+							</ErrorBoundary>
+						</div>
+
+						{/* About Update section */}
+						<div className={shouldShowTab('aboutUpdate') ? `` : 'hidden'}>
+							<ErrorBoundary>
+								<AboutUpdate />
+							</ErrorBoundary>
+						</div>
 
 						</div>
 
