@@ -19,11 +19,11 @@ export interface IMetricsPollService {
 
 const PING_EVERY_MS = 15 * 1000 * 60  // 15 minutes
 
-export const IMetricsPollService = createDecorator<IMetricsPollService>('voidMetricsPollService');
+export const IMetricsPollService = createDecorator<IMetricsPollService>('senweaverMetricsPollService');
 class MetricsPollService extends Disposable implements IMetricsPollService {
 	_serviceBrand: undefined;
 
-	static readonly ID = 'voidMetricsPollService';
+	static readonly ID = 'senweaverMetricsPollService';
 
 
 	private readonly intervalID: number
