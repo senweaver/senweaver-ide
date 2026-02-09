@@ -166,6 +166,33 @@ AI 驱动的代码安全检测与修复：
   - 可配置多个 MCP 服务器
   - 自动发现和调用 MCP 工具
 
+### 🌐 远程协作
+
+通过 WebRTC P2P 连接实现远程协作，让远程 App 客户端可以连接到 IDE 并实时交互：
+
+- **P2P 连接**
+  - 基于 WebRTC 的点对点直连，数据传输不经过服务器
+  - 使用官方信令服务器 `wss://ide-api.senweaver.com/ws/signaling` 进行连接建立
+  - 自动获取 ICE 服务器配置，支持 NAT 穿透
+  - 单设备连接限制，确保每个 IDE 同时只允许一台 App 连接
+
+- **远程控制**
+  - App 端可以向 IDE 的 AI 助手发送提问和任务
+  - 实时同步聊天界面状态到远程 App
+  - 异步数据传输，不影响 IDE 本地性能和操作
+  - 支持流式输出同步，实时显示 AI 响应
+
+- **连接管理**
+  - 可开启/关闭远程连接开关
+  - 显示设备码供 App 端输入连接
+  - 显示已连接的设备信息
+  - 支持主动断开连接
+
+- **安全特性**
+  - 设备码验证机制
+  - 连接状态实时监控
+  - 自动重连和心跳保活
+
 ### 🔌 API 调用能力
 
 AI 可直接调用 HTTP API，实现与外部服务的交互：
@@ -411,6 +438,8 @@ senweaver-ide/
 │   │               │   ├── senweaverDesignerPreviewEditor.ts  # 设计预览
 │   │               │   ├── senweaverCommandBarService.ts  # 命令栏服务
 │   │               │   ├── senweaverOnlineConfigContribution.ts  # 在线配置
+│   │               │   ├── remoteCollaborationService.ts         # 远程协作服务
+│   │               │   ├── remoteCollaborationServiceInterface.ts  # 远程协作接口
 │   │               │   ├── sidebarPane.ts                 # 侧边栏面板
 │   │               │   ├── subagentToolService.ts         # 子代理服务
 │   │               │   ├── terminalToolService.ts         # 终端工具服务
