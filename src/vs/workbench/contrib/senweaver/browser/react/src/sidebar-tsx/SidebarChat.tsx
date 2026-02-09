@@ -5,7 +5,7 @@
 
 import React, { ButtonHTMLAttributes, FormEvent, FormHTMLAttributes, Fragment, KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { useAccessor, useChatThreadsState, useChatThreadsStreamState, useSettingsState, useActiveURI, useCommandBarState, useFullChatThreadsStreamState, useAnyThreadRunning } from '../util/services.js';
+import { useAccessor, useChatThreadsState, useChatThreadsStreamState, useSettingsState, useActiveURI, useCommandBarState, useFullChatThreadsStreamState, useAnyThreadRunning, useRemoteCollaborationState } from '../util/services.js';
 import { ScrollType } from '../../../../../../../editor/common/editorCommon.js';
 
 import { ChatMarkdownRender, ChatMessageLocation, getApplyBoxId } from '../markdown/ChatMarkdownRender.js';
@@ -4992,6 +4992,28 @@ const detectNavigationLinks = (html: string, currentDesignId: string, allDesigns
 	return links;
 };
 
+/** 远程协作连接状态指示器（使用 memo 防止父组件更新导致不必要的重渲染） */
+const RemoteCollaborationIndicator = React.memo(() => {
+	const remoteState = useRemoteCollaborationState()
+	const { connectionStatus, connectedPeers } = remoteState
+
+	if (connectionStatus !== 'connected' || connectedPeers.length === 0) {
+		return null
+	}
+
+	return (
+		<div className='flex items-center gap-2 px-4 py-1.5 bg-emerald-500/10 border-b border-emerald-500/20 text-xs select-none flex-shrink-0'>
+			<span className='w-2 h-2 rounded-full bg-emerald-400 animate-pulse flex-shrink-0'></span>
+			<span className='text-emerald-400 truncate'>
+				远程协作已连接 ({connectedPeers.length} 台设备)
+			</span>
+			<span className='text-emerald-400/60 truncate'>
+				{connectedPeers.map(p => p.deviceName).join(', ')}
+			</span>
+		</div>
+	)
+})
+
 export const SidebarChat = () => {
 	const textAreaRef = useRef<HTMLTextAreaElement | null>(null)
 	const textAreaFnsRef = useRef<TextAreaFns | null>(null)
@@ -7555,6 +7577,8 @@ ${userMessage ? `\n用户补充需求：${userMessage}\n` : ''}
 		ref={sidebarRef}
 		className='w-full h-full flex flex-col overflow-hidden'
 	>
+		{/* 远程协作连接状态指示器 */}
+		<RemoteCollaborationIndicator />
 
 		<ErrorBoundary>
 			{messagesHTML}

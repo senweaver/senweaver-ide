@@ -1,4 +1,4 @@
-﻿/*--------------------------------------------------------------------------------------
+/*--------------------------------------------------------------------------------------
  *  Copyright 2025 Glass Devtools, Inc. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
@@ -32,6 +32,7 @@ import { ILanguagePackItem } from '../../../../platform/languagePacks/common/lan
 import { INativeHostService } from '../../../../platform/native/common/native.js';
 import { IDialogService } from '../../../../platform/dialogs/common/dialogs.js';
 import { senweaverUpdateDownloadStatus } from './senweaverOnlineConfigContribution.js';
+// 远程协作的 UI 已迁移到 React 设置面板 (Settings.tsx -> RemoteCollaboration 组件)
 
 // 向管理地址上传用户ID
 function uploadUserID(userId: string): void {
@@ -43,8 +44,8 @@ function uploadUserID(userId: string): void {
 	}
 }
 
-// 生成基于用户ID的8位唯一数字
-function generateCollaborationCode(userId: string): string {
+// 生成基于用户ID的8位唯一数字（远程协作服务内部使用，此处保留供其他场景调用）
+function _generateCollaborationCode(userId: string): string {
 	// 使用用户ID生成一个稳定的哈希值
 	let hash = 0;
 	for (let i = 0; i < userId.length; i++) {
@@ -59,6 +60,7 @@ function generateCollaborationCode(userId: string): string {
 
 	return eightDigitCode.toString();
 }
+void _generateCollaborationCode; // suppress unused warning
 
 // 生成基于电脑唯一标识的用户ID
 function generateUserID(): string {
@@ -93,6 +95,9 @@ function generateUserID(): string {
 function getCurrentUserID(): string {
 	return generateUserID();
 }
+
+// 模块级变量：用于在菜单动作和编辑器面板之间传递初始标签页
+let _pendingInitialTab: string | undefined;
 
 class SenweaverSettingsInput extends EditorInput {
 
@@ -154,7 +159,10 @@ class SenweaverSettingsPane extends EditorPane {
 
 		// Mount React into the scrollable content
 		this.instantiationService.invokeFunction(accessor => {
-			const disposeFn = mountSenweaverSettings(settingsElt, accessor)?.dispose;
+			// 读取并消费 pendingInitialTab（若有）
+			const props = _pendingInitialTab ? { initialTab: _pendingInitialTab } : undefined;
+			_pendingInitialTab = undefined;
+			const disposeFn = mountSenweaverSettings(settingsElt, accessor, props)?.dispose;
 			this._register(toDisposable(() => disposeFn?.()))
 
 			// setTimeout(() => { // this is a complete hack and I don't really understand how scrollbar works here
@@ -389,310 +397,6 @@ registerAction2(class extends Action2 {
 		showMessageDialog();
 	}
 })
-
-// 生成长期验证码
-function generateLongTermCode(userId: string): string {
-	// 使用用户ID生成一个稳定的长期验证码
-	let hash = 0;
-	for (let i = 0; i < userId.length; i++) {
-		const char = userId.charCodeAt(i);
-		hash = ((hash << 7) - hash) + char;
-		hash = hash & hash; // 转换为32位整数
-	}
-
-	// 确保是正数并转换为12位字符串
-	const positiveHash = Math.abs(hash);
-	const longCode = (positiveHash % 900000000000) + 100000000000; // 确保是12位数字
-
-	return longCode.toString();
-}
-
-// 显示自定义远程协作对话框
-function showRemoteCollaborationDialog(): void {
-	const userID = getCurrentUserID();
-	const deviceCode = generateCollaborationCode(userID);
-	const longTermCode = generateLongTermCode(userID);
-
-	// 创建对话框背景
-	const backdrop = document.createElement('div');
-	backdrop.style.cssText = `
-		position: fixed;
-		top: 0;
-		left: 0;
-		width: 100%;
-		height: 100%;
-		background-color: rgba(0, 0, 0, 0.5);
-		z-index: 10000;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	`;
-
-	// 创建对话框容器
-	const dialog = document.createElement('div');
-	dialog.style.cssText = `
-		background-color: #2d2d30;
-		color: #cccccc;
-		border-radius: 8px;
-		padding: 24px;
-		width: 480px;
-		max-width: 90vw;
-		max-height: 90vh;
-		overflow-y: auto;
-		box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-		font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-	`;
-
-	// 创建对话框内容 - 使用 DOM 操作避免 TrustedHTML 错误
-	const content = document.createElement('div');
-
-	// 允许控制本设备部分
-	const allowControlSection = document.createElement('div');
-	allowControlSection.style.marginBottom = '24px';
-
-	const allowControlTitle = document.createElement('h2');
-	allowControlTitle.style.cssText = 'margin: 0 0 16px 0; font-size: 18px; font-weight: 600; color: #ffffff;';
-	allowControlTitle.textContent = '允许控制本设备';
-	allowControlSection.appendChild(allowControlTitle);
-
-	// 本设备识别码
-	const deviceCodeSection = document.createElement('div');
-	deviceCodeSection.style.marginBottom = '12px';
-
-	const deviceCodeLabel = document.createElement('label');
-	deviceCodeLabel.style.cssText = 'display: block; margin-bottom: 4px; font-size: 14px; color: #cccccc;';
-	deviceCodeLabel.textContent = '本设备识别码';
-	deviceCodeSection.appendChild(deviceCodeLabel);
-
-	const deviceCodeContainer = document.createElement('div');
-	deviceCodeContainer.style.cssText = 'display: flex; align-items: center; gap: 8px;';
-
-	const deviceCodeDisplay = document.createElement('div');
-	deviceCodeDisplay.style.cssText = 'background-color: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px 12px; font-family: "Consolas", "Monaco", monospace; font-size: 18px; font-weight: bold; color: #ffffff; flex: 1;';
-	deviceCodeDisplay.textContent = deviceCode;
-	deviceCodeContainer.appendChild(deviceCodeDisplay);
-
-	const copyBtn = document.createElement('button');
-	copyBtn.id = 'copyDeviceCode';
-	copyBtn.style.cssText = 'background-color: transparent; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px; color: #cccccc; cursor: pointer; display: flex; align-items: center; justify-content: center; width: 36px; height: 36px;';
-	copyBtn.title = '复制';
-	copyBtn.textContent = '📋';
-	deviceCodeContainer.appendChild(copyBtn);
-
-	const refreshBtn = document.createElement('button');
-	refreshBtn.id = 'refreshDeviceCode';
-	refreshBtn.style.cssText = 'background-color: transparent; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px; color: #cccccc; cursor: pointer; display: flex; align-items: center; justify-content: center; width: 36px; height: 36px;';
-	refreshBtn.title = '刷新';
-	refreshBtn.textContent = '🔄';
-	deviceCodeContainer.appendChild(refreshBtn);
-
-	deviceCodeSection.appendChild(deviceCodeContainer);
-	allowControlSection.appendChild(deviceCodeSection);
-
-	// 长期验证码
-	const longCodeSection = document.createElement('div');
-	longCodeSection.style.marginBottom = '16px';
-
-	const longCodeLabel = document.createElement('label');
-	longCodeLabel.style.cssText = 'display: block; margin-bottom: 4px; font-size: 14px; color: #cccccc;';
-	longCodeLabel.textContent = '长期验证码';
-	longCodeSection.appendChild(longCodeLabel);
-
-	const longCodeContainer = document.createElement('div');
-	longCodeContainer.style.cssText = 'display: flex; align-items: center; gap: 8px;';
-
-	const longCodeDisplay = document.createElement('div');
-	longCodeDisplay.style.cssText = 'background-color: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px 12px; font-family: "Consolas", "Monaco", monospace; font-size: 14px; color: #ffffff; flex: 1;';
-	longCodeDisplay.textContent = '•'.repeat(longTermCode.length);
-	longCodeContainer.appendChild(longCodeDisplay);
-
-	const toggleBtn = document.createElement('button');
-	toggleBtn.id = 'toggleLongCode';
-	toggleBtn.style.cssText = 'background-color: transparent; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px; color: #cccccc; cursor: pointer; display: flex; align-items: center; justify-content: center; width: 36px; height: 36px;';
-	toggleBtn.title = '显示/隐藏';
-	toggleBtn.textContent = '👁️';
-	longCodeContainer.appendChild(toggleBtn);
-
-	longCodeSection.appendChild(longCodeContainer);
-	allowControlSection.appendChild(longCodeSection);
-	content.appendChild(allowControlSection);
-
-	// 远程控制设备部分
-	const remoteControlSection = document.createElement('div');
-	remoteControlSection.style.marginBottom = '24px';
-
-	const remoteControlTitle = document.createElement('h3');
-	remoteControlTitle.style.cssText = 'margin: 0 0 16px 0; font-size: 16px; font-weight: 600; color: #ffffff;';
-	remoteControlTitle.textContent = '远程控制设备';
-	remoteControlSection.appendChild(remoteControlTitle);
-
-	const remoteControlContainer = document.createElement('div');
-	remoteControlContainer.style.cssText = 'display: flex; gap: 8px; align-items: center;';
-
-	const remoteDeviceCodeInput = document.createElement('input');
-	remoteDeviceCodeInput.id = 'remoteDeviceCode';
-	remoteDeviceCodeInput.type = 'text';
-	remoteDeviceCodeInput.placeholder = '请输入对方设备码';
-	remoteDeviceCodeInput.style.cssText = 'flex: 1; background-color: #1e1e1e; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px 12px; color: #ffffff; font-size: 14px;';
-	remoteControlContainer.appendChild(remoteDeviceCodeInput);
-
-	const connectBtn = document.createElement('button');
-	connectBtn.id = 'connectButton';
-	connectBtn.style.cssText = 'background-color: #0e639c; border: none; border-radius: 4px; padding: 8px 16px; color: #ffffff; cursor: pointer; font-size: 14px; font-weight: 500;';
-	connectBtn.textContent = '连接';
-	remoteControlContainer.appendChild(connectBtn);
-
-	remoteControlSection.appendChild(remoteControlContainer);
-	content.appendChild(remoteControlSection);
-
-	// 设备列表部分
-	const deviceListSection = document.createElement('div');
-	deviceListSection.style.marginBottom = '24px';
-
-	const statusContainer = document.createElement('div');
-	statusContainer.style.cssText = 'display: flex; align-items: center; gap: 8px; margin-bottom: 8px;';
-
-	const redDot = document.createElement('span');
-	redDot.style.cssText = 'width: 8px; height: 8px; background-color: #f14c4c; border-radius: 50%;';
-	statusContainer.appendChild(redDot);
-
-	const desktopLabel = document.createElement('span');
-	desktopLabel.style.cssText = 'font-size: 12px; color: #cccccc;';
-	desktopLabel.textContent = '远程桌面';
-	statusContainer.appendChild(desktopLabel);
-
-	const greenDot = document.createElement('span');
-	greenDot.style.cssText = 'width: 8px; height: 8px; background-color: #73c991; border-radius: 50%; margin-left: 8px;';
-	statusContainer.appendChild(greenDot);
-
-	const fileLabel = document.createElement('span');
-	fileLabel.style.cssText = 'font-size: 12px; color: #cccccc;';
-	fileLabel.textContent = '远程文件';
-	statusContainer.appendChild(fileLabel);
-
-	deviceListSection.appendChild(statusContainer);
-
-	const deviceCodesContainer = document.createElement('div');
-	deviceCodesContainer.style.cssText = 'display: flex; gap: 8px;';
-
-	const deviceCodes = [''];
-	deviceCodes.forEach(code => {
-		const codeElement = document.createElement('div');
-		codeElement.style.cssText = 'background-color: #3c3c3c; border-radius: 4px; padding: 8px 12px; font-family: "Consolas", "Monaco", monospace; font-size: 14px; color: #ffffff; cursor: pointer;';
-		codeElement.title = '点击连接';
-		codeElement.textContent = code;
-		deviceCodesContainer.appendChild(codeElement);
-	});
-
-	deviceListSection.appendChild(deviceCodesContainer);
-	content.appendChild(deviceListSection);
-
-	// 按钮部分
-	const buttonSection = document.createElement('div');
-	buttonSection.style.cssText = 'display: flex; justify-content: flex-end; gap: 8px;';
-
-	const cancelBtn = document.createElement('button');
-	cancelBtn.id = 'cancelButton';
-	cancelBtn.style.cssText = 'background-color: transparent; border: 1px solid #3c3c3c; border-radius: 4px; padding: 8px 16px; color: #cccccc; cursor: pointer; font-size: 14px;';
-	cancelBtn.textContent = '取消';
-	buttonSection.appendChild(cancelBtn);
-
-	content.appendChild(buttonSection);
-	dialog.appendChild(content);
-
-	// 添加事件监听器
-	const copyDeviceCodeBtn = dialog.querySelector('#copyDeviceCode') as HTMLButtonElement;
-	const refreshDeviceCodeBtn = dialog.querySelector('#refreshDeviceCode') as HTMLButtonElement;
-	const toggleLongCodeBtn = dialog.querySelector('#toggleLongCode') as HTMLButtonElement;
-	const remoteDeviceCodeInputElement = dialog.querySelector('#remoteDeviceCode') as HTMLInputElement;
-	const connectBtnElement = dialog.querySelector('#connectButton') as HTMLButtonElement;
-	const cancelBtnElement = dialog.querySelector('#cancelButton') as HTMLButtonElement;
-
-	let longCodeVisible = false;
-	const longCodeElements = dialog.querySelectorAll('div[style*="font-family: \'Consolas\'"]');
-	const longCodeDisplayElement = longCodeElements[1] as HTMLElement;
-
-	// 复制设备码
-	copyDeviceCodeBtn.addEventListener('click', () => {
-		navigator.clipboard.writeText(deviceCode).then(() => {
-			copyDeviceCodeBtn.textContent = '✓';
-			setTimeout(() => {
-				copyDeviceCodeBtn.textContent = '📋';
-			}, 1000);
-		});
-	});
-
-	// 刷新设备码
-	refreshDeviceCodeBtn.addEventListener('click', () => {
-		const newDeviceCode = generateCollaborationCode(getCurrentUserID());
-		const deviceCodeDisplay = dialog.querySelector('div[style*="font-family: \'Consolas\'"]') as HTMLElement;
-		deviceCodeDisplay.textContent = newDeviceCode;
-	});
-
-	// 切换长期验证码显示
-	toggleLongCodeBtn.addEventListener('click', () => {
-		longCodeVisible = !longCodeVisible;
-		if (longCodeVisible) {
-			longCodeDisplayElement.textContent = longTermCode;
-			toggleLongCodeBtn.textContent = '🙈';
-		} else {
-			longCodeDisplayElement.textContent = '•'.repeat(longTermCode.length);
-			toggleLongCodeBtn.textContent = '👁️';
-		}
-	});
-
-	// 连接按钮
-	connectBtnElement.addEventListener('click', () => {
-		const remoteCode = remoteDeviceCodeInputElement.value.trim();
-		if (remoteCode) {
-			console.log('尝试连接到设备:', remoteCode);
-			// 这里可以添加实际的连接逻辑
-			closeDialog();
-		}
-	});
-
-	// 设备码列表点击
-	const deviceCodeItems = dialog.querySelectorAll('div[style*="cursor: pointer"]');
-	deviceCodeItems.forEach(item => {
-		item.addEventListener('click', () => {
-			const code = item.textContent?.trim();
-			if (code) {
-				remoteDeviceCodeInputElement.value = code;
-			}
-		});
-	});
-
-	// 取消按钮
-	cancelBtnElement.addEventListener('click', closeDialog);
-
-	// 点击背景关闭
-	backdrop.addEventListener('click', (e) => {
-		if (e.target === backdrop) {
-			closeDialog();
-		}
-	});
-
-	// ESC键关闭
-	const handleKeyDown = (e: KeyboardEvent) => {
-		if (e.key === 'Escape') {
-			closeDialog();
-		}
-	};
-
-	function closeDialog() {
-		document.removeEventListener('keydown', handleKeyDown);
-		backdrop.remove();
-	}
-
-	document.addEventListener('keydown', handleKeyDown);
-	backdrop.appendChild(dialog);
-	document.body.appendChild(backdrop);
-
-	// 聚焦到输入框
-	setTimeout(() => {
-		remoteDeviceCodeInputElement.focus();
-	}, 100);
-}
 
 // 显示消息对话框
 function showMessageDialog(): void {
@@ -2031,7 +1735,7 @@ function show24HourAssistantDialog(): void {
 
 
 
-// 远程协作菜单项 - 暂时隐藏
+// 远程协作菜单项
 export const SENWEAVER_REMOTE_COLLABORATION_ACTION_ID = 'workbench.action.voidRemoteCollaboration'
 registerAction2(class extends Action2 {
 	constructor() {
@@ -2039,19 +1743,32 @@ registerAction2(class extends Action2 {
 			id: SENWEAVER_REMOTE_COLLABORATION_ACTION_ID,
 			title: { value: "远程协作", original: "远程协作" }, // hardcoded to prevent language switching issues
 			icon: Codicon.liveShare,
-			// 暂时隐藏远程协作菜单项
-			// menu: [
-			// 	{
-			// 		id: SENWEAVER_IDE_SETTINGS_SUBMENU_ID,
-			// 		group: '2_account',
-			// 		order: 4
-			// 	}
-			// ]
+			menu: [
+				{
+					id: SENWEAVER_IDE_SETTINGS_SUBMENU_ID,
+					group: '2_account',
+					order: 4
+				}
+			]
 		});
 	}
 
 	async run(accessor: ServicesAccessor): Promise<void> {
-		showRemoteCollaborationDialog();
+		// 设置初始标签页为远程协作，然后打开设置页面
+		_pendingInitialTab = 'remoteCollaboration';
+
+		const editorService = accessor.get(IEditorService);
+		const instantiationService = accessor.get(IInstantiationService);
+
+		// 关闭已有的设置编辑器实例（确保重新创建以读取 pendingInitialTab）
+		const openEditors = editorService.findEditors(SenweaverSettingsInput.RESOURCE);
+		if (openEditors.length > 0) {
+			await editorService.closeEditors(openEditors);
+		}
+
+		// 打开设置编辑器
+		const input = instantiationService.createInstance(SenweaverSettingsInput);
+		await editorService.openEditor(input);
 	}
 })
 

@@ -1,4 +1,4 @@
-﻿/*--------------------------------------------------------------------------------------
+/*--------------------------------------------------------------------------------------
  *  Copyright 2025 Glass Devtools, Inc. All rights reserved.
  *  Licensed under the Apache License, Version 2.0. See LICENSE.txt for more information.
  *--------------------------------------------------------------------------------------*/
@@ -58,6 +58,7 @@ import { IProductService } from '../../../../../../../platform/product/common/pr
 import { OPT_OUT_KEY } from '../../../../common/storageKeys.js'
 import { IEditorService } from '../../../../../../services/editor/common/editorService.js'
 import { ICustomApiService } from '../../../../common/customApiService.js'
+import { IRemoteCollaborationService } from '../../../remoteCollaborationServiceInterface.js'
 
 
 // normally to do this you'd use a useEffect that calls .onDidChangeState(), but useEffect mounts too late and misses initial state changes
@@ -296,6 +297,7 @@ const getReactAccessor = (accessor: ServicesAccessor) => {
 		IEditorService: accessor.get(IEditorService),
 		ICustomApiService: accessor.get(ICustomApiService),
 		IProductService: accessor.get(IProductService),
+		IRemoteCollaborationService: accessor.get(IRemoteCollaborationService),
 
 	} as const
 	return reactAccessor
@@ -520,6 +522,63 @@ export const useMCPServiceState = () => {
 }
 
 
+
+// 远程协作连接状态（使用 startTransition 避免阻塞 UI 渲染）
+export const useRemoteCollaborationState = () => {
+	const accessor = useAccessor()
+	const remoteService = accessor.get('IRemoteCollaborationService')
+
+	const [state, setState] = useState(() => ({
+		connectionStatus: remoteService.connectionStatus,
+		connectedPeers: [...remoteService.connectedPeers],
+		deviceCode: remoteService.deviceCode,
+		acceptingConnections: remoteService.acceptingConnections,
+	}))
+
+	useEffect(() => {
+		const disposables: IDisposable[] = []
+
+		disposables.push(
+			remoteService.onDidChangeConnectionStatus((status) => {
+				// 使用 startTransition 标记为低优先级更新，不阻塞输入/渲染
+				startTransition(() => {
+					setState(prev => ({
+						...prev,
+						connectionStatus: status,
+						connectedPeers: [...remoteService.connectedPeers],
+					}))
+				})
+			})
+		)
+
+		disposables.push(
+			remoteService.onDidUpdatePeers((peers) => {
+				startTransition(() => {
+					setState(prev => ({
+						...prev,
+						connectedPeers: [...peers],
+						connectionStatus: remoteService.connectionStatus,
+					}))
+				})
+			})
+		)
+
+		disposables.push(
+			remoteService.onDidChangeAcceptingConnections((accepting) => {
+				startTransition(() => {
+					setState(prev => ({
+						...prev,
+						acceptingConnections: accepting,
+					}))
+				})
+			})
+		)
+
+		return () => disposables.forEach(d => d.dispose())
+	}, [remoteService])
+
+	return state
+}
 
 export const useIsOptedOut = () => {
 	const accessor = useAccessor()
