@@ -1,4 +1,4 @@
-﻿/*---------------------------------------------------------------------------------------------
+/*---------------------------------------------------------------------------------------------
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
@@ -133,6 +133,7 @@ import { LLMMessageChannel } from '../../workbench/contrib/senweaver/electron-ma
 import { SenweaverSCMService } from '../../workbench/contrib/senweaver/electron-main/senweaverSCMMainService.js';
 import { ISenweaverSCMService } from '../../workbench/contrib/senweaver/common/senweaverSCMTypes.js';
 import { MCPChannel } from '../../workbench/contrib/senweaver/electron-main/mcpChannel.js';
+import { registerPythonRuntimeChannel } from '../../workbench/contrib/pythonRuntime/electron-main/pythonRuntime.contribution.js';
 /**
  * The main VS Code application. There will only ever be one instance,
  * even if the user starts many instances (e.g. from the command line).
@@ -1271,6 +1272,9 @@ export class CodeApplication extends Disposable {
 		// Senweaver added this
 		const mcpChannel = new MCPChannel();
 		mainProcessElectronServer.registerChannel('senweaver-channel-mcp', mcpChannel);
+
+		// Python Runtime
+		registerPythonRuntimeChannel(mainProcessElectronServer, accessor.get(IInstantiationService));
 
 		// Extension Host Debug Broadcasting
 		const electronExtensionHostDebugBroadcastChannel = new ElectronExtensionHostDebugBroadcastChannel(accessor.get(IWindowsMainService));

@@ -10,6 +10,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as child_process from 'child_process';
 import * as os from 'os';
+import { detectBuiltinPython } from './pythonRuntimeIntegration.js';
 
 // Python 环境信息接口
 interface PythonEnvironment {
@@ -229,10 +230,19 @@ async function refreshEnvironments(): Promise<void> {
     const pyenvEnvs = await detectPyenvEnvironments();
     discoveredEnvironments.push(...pyenvEnvs);
 
-    // 5. 添加系统 Python
-    const systemPython = await detectSystemPython();
-    if (systemPython) {
-        discoveredEnvironments.push(systemPython);
+    // 5. Detect builtin Python runtime (priority)
+    const builtinPython = await detectBuiltinPython();
+    if (builtinPython) {
+        discoveredEnvironments.push(builtinPython);
+    }
+
+    // 6. Add system Python (if fallback is enabled)
+    const fallbackToSystem = config.get<boolean>('runtime.fallbackToSystem', true);
+    if (fallbackToSystem || !builtinPython) {
+        const systemPython = await detectSystemPython();
+        if (systemPython) {
+            discoveredEnvironments.push(systemPython);
+        }
     }
 
     // 去重

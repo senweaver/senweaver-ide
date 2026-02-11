@@ -99,6 +99,31 @@
           "enum": ["None", "Pylance", "Jedi"],
           "description": "%config.languageServer%",
           "scope": "resource"
+        },
+        "python.runtime.useBuiltin": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to use builtin Python runtime. If enabled, the IDE will automatically download and manage Python without requiring manual installation.",
+          "scope": "application"
+        },
+        "python.runtime.preferredVersion": {
+          "type": "string",
+          "default": "3.12.4",
+          "enum": ["3.9.18", "3.10.13", "3.11.9", "3.12.4", "3.13.1"],
+          "description": "Preferred Python version. This version will be downloaded on first use.",
+          "scope": "application"
+        },
+        "python.runtime.autoDownload": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to automatically download Python. If enabled, download will start automatically when Python is needed but not installed.",
+          "scope": "application"
+        },
+        "python.runtime.fallbackToSystem": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to fallback to system Python if builtin Python is not available.",
+          "scope": "application"
         }
       }
     },
