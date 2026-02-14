@@ -126,3 +126,9 @@ import '../common/senweaverModelService.js'
 
 // changelog service
 import '../common/senweaverChangelogService.js'
+
+// trace collector service (强化学习数据收集 - 第一阶段)
+import '../common/traceCollectorService.js'
+
+// APO service (自动Prompt优化 - 第二阶段)
+import '../common/apoService.js'

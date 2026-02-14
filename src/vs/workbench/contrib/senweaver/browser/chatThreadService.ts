@@ -46,19 +46,20 @@ import { getModelCapabilities } from '../common/modelCapabilities.js';
 import { isOwnProviderEnabled, getOwnProviderModelAccess, sendModelUsageReport } from './senweaverOnlineConfigContribution.js';
 import { tpmRateLimiter } from '../common/tpmRateLimiter.js';
 import { enhancedContextManager } from '../common/smartContextManager.js';
+import { ITraceCollectorService } from '../common/traceCollectorService.js';
 
 // related to retrying when LLM message has error
-const CHAT_RETRIES = 5  // 增加重试次数
-const BASE_RETRY_DELAY = 3000  // 基础重试延迟
-const MAX_RETRY_DELAY = 60000  // 最大重试延迟
+const CHAT_RETRIES = 5  // Increased retry count
+const BASE_RETRY_DELAY = 3000  // Base retry delay
+const MAX_RETRY_DELAY = 60000  // Max retry delay
 
-// 计算指数退避延迟
+// Compute exponential backoff delay
 const getRetryDelay = (attempt: number, isTPMError: boolean): number => {
 	if (isTPMError) {
-		// TPM 错误使用更长的延迟
+		// TPM errors use longer delays
 		return Math.min(BASE_RETRY_DELAY * Math.pow(2, attempt), MAX_RETRY_DELAY);
 	}
-	// 普通错误使用较短延迟
+	// Normal errors use shorter delays
 	return Math.min(BASE_RETRY_DELAY * Math.pow(1.5, attempt - 1), MAX_RETRY_DELAY / 2);
 };
 
@@ -68,13 +69,13 @@ const maybePerfLog = (_label: string, _ms: number, _extra?: Record<string, any>)
 const debugThinkingLog = (_label: string, _elapsed: number, _extra?: Record<string, any>) => { }
 const schedulePerfHeartbeats = (_label: string, _extra?: Record<string, any>) => { }
 
-// 获取用户 ID（与 SenweaverOnlineConfigContribution.ts 中相同的逻辑）
+// Get user ID (same logic as in SenweaverOnlineConfigContribution.ts)
 function getUserId(): string {
 	const storageKey = 'senweaver.user.id';
 	return localStorage.getItem(storageKey) || 'unknown';
 }
 
-// 发送模型使用记录到后端（仅针对 ownProvider）- 使用 WebSocket 方式
+// Send model usage report to backend (ownProvider only) - via WebSocket
 function reportModelUsage(userId: string, modelName: string): boolean {
 	return sendModelUsageReport(userId, modelName, 1);
 }
@@ -188,9 +189,9 @@ export type ThreadType = {
 			}
 		}
 
-		uploadedImages?: ImageAttachment[]; // 存储当前线程中上传的图片附件
+		uploadedImages?: ImageAttachment[]; // Stores uploaded image attachments in the current thread
 
-		hasAutoAddedFilesThisRound?: boolean; // 标记本轮对话是否已经自动添加过文件
+		hasAutoAddedFilesThisRound?: boolean; // Flag whether files have been auto-added this round
 
 		mountedInfo?: {
 			whenMounted: Promise<WhenMounted>
@@ -413,6 +414,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		@IMCPService private readonly _mcpService: IMCPService,
 		@ITextFileService private readonly _textFileService: ITextFileService,
 		@IEditorService private readonly _editorService: IEditorService,
+		@ITraceCollectorService private readonly _traceCollectorService: ITraceCollectorService,
 	) {
 		super()
 		this.state = { allThreads: {}, currentThreadId: null as unknown as string } // default state
@@ -887,17 +889,17 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		else if (this.streamState[threadId]?.isRunning === 'tool') {
 			const { toolName, toolParams, id, content: content_, rawParams, mcpServerName } = this.streamState[threadId].toolInfo
 
-			// 对于命令行工具，用户手动停止视为正常完成
+			// For command-line tools, user manual stop is treated as normal completion
 			const isCommandTool = toolName === 'run_command' || toolName === 'run_persistent_command'
 			if (isCommandTool) {
-				// 命令行工具被用户停止，视为正常完成
+				// Command tool stopped by user, treated as normal completion
 				const successResult = {
-					output: '[Command stopped by user / 用户手动停止命令]',
+					output: '[Command stopped by user]',
 					resolveReason: { type: 'user_stopped' as const }
 				}
 				this._updateLatestTool(threadId, { role: 'tool', name: toolName, params: toolParams, id, content: 'Command stopped by user.', rawParams, type: 'success', result: successResult, mcpServerName })
 			} else {
-				// 其他工具保持原有逻辑
+				// Other tools keep original logic
 				const content = content_ || this.toolErrMsgs.interrupted
 				this._updateLatestTool(threadId, { role: 'tool', name: toolName, params: toolParams, id, content, rawParams, type: 'rejected', result: null, mcpServerName })
 			}
@@ -973,7 +975,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			maybePerfLog('runToolCall validateParams', perfNow() - tValidate0, { threadId, traceId, toolName })
 
 			// Note: Checkpoint is now only added after the entire conversation ends (see line ~908)
-			// This prevents the "回退到本轮对话发起前" button from appearing after every file edit
+			// This prevents the "revert to before this round" button from appearing after every file edit
 			// if (toolName === 'edit_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['edit_file']).uri }) }
 			// if (toolName === 'rewrite_file') { this._addToolEditCheckpoint({ threadId, uri: (toolParams as BuiltinToolCallParams['rewrite_file']).uri }) }
 
@@ -993,9 +995,9 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			toolParams = opts.validatedParams
 		}
 
-		// 1.6. 特殊处理 screenshot_to_code 和 analyze_image：自动注入原始图片数据
-		// 这个逻辑放在 if-else 之后，确保无论是否预批准都会执行
-		// 因为 AI 无法直接传递完整的 base64 图片数据，需要从当前线程的用户消息中获取
+		// 1.6. Special handling for screenshot_to_code and analyze_image: auto-inject original image data
+		// This logic is placed after the if-else to ensure it runs regardless of pre-approval
+		// Because AI cannot directly pass full base64 image data, we need to get it from user messages in the current thread
 		if ((toolName === 'screenshot_to_code' || toolName === 'analyze_image') && isBuiltInTool) {
 			const params = toolParams as any;
 			const needsImageData = toolName === 'analyze_image' ||
@@ -1004,31 +1006,31 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			if (needsImageData) {
 				const thread = this.state.allThreads[threadId];
 				if (thread) {
-					// 从最近的用户消息中获取所有图片
+					// Get all images from the most recent user message
 					for (let i = thread.messages.length - 1; i >= 0; i--) {
 						const msg = thread.messages[i];
 						if (msg.role === 'user' && msg.images && msg.images.length > 0) {
-							// 收集所有图片的URL
+							// Collect all image URLs
 							const imageUrls: string[] = [];
 							for (const img of msg.images) {
-								// 优先使用消息中已保存的URL
+								// Prefer URL already saved in the message
 								if (img.uploadedUrl && img.uploadStatus === 'uploaded') {
 									imageUrls.push(img.uploadedUrl);
 								} else {
-									// 消息快照中没有URL，尝试从当前线程状态获取最新的图片信息
+									// No URL in message snapshot, try to get latest image info from current thread state
 									const currentUploadedImages = thread.state.uploadedImages || [];
 									const latestImg = currentUploadedImages.find(u => u.id === img.id);
 									if (latestImg?.uploadedUrl && latestImg.uploadStatus === 'uploaded') {
 										imageUrls.push(latestImg.uploadedUrl);
-										// 同时更新消息中的图片信息（避免下次还要查找）
+										// Also update image info in message (avoid repeated lookups)
 										img.uploadedUrl = latestImg.uploadedUrl;
 										img.uploadStatus = latestImg.uploadStatus;
 									} else {
-										// 如果还是没有URL，跳过
+										// If still no URL, skip
 									}
 								}
 							}
-							// 只传递有效的URL
+							// Only pass valid URLs
 							if (imageUrls.length > 0) {
 								params.image_data = imageUrls.length === 1 ? imageUrls[0] : imageUrls;
 							}
@@ -1070,8 +1072,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		// this._setStreamState(threadId, { isRunning: 'tool' }, 'merge')
 		const runningTool = { role: 'tool', type: 'running_now', name: toolName, params: toolParamsForMessage, content: '(value not received yet...)', result: null, id: toolId, rawParams: rawParamsForMessage, mcpServerName } as const
 		this._updateLatestTool(threadId, runningTool)
-		// 优化：移除 waitNextFrame() 延迟，立即开始工具调用，UI更新可以在工具执行期间异步完成
-		// 工具调用本身需要时间，不需要等待UI更新完成
+		// Optimization: removed waitNextFrame() delay, start tool call immediately, UI updates can complete async during tool execution
+		// Tool calls take time on their own, no need to wait for UI updates
 
 
 		let interrupted = false
@@ -1111,16 +1113,26 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			if (interrupted) { return { interrupted: true } } // the tool result is added where we interrupt, not here
 
 			const errorMessage = getErrorMessage(error)
-			// 优化：移除 waitNextFrame() 延迟，立即更新错误状态，不阻塞错误处理流程
+			// Optimization: removed waitNextFrame() delay, update error state immediately without blocking error handling flow
 			this._updateLatestTool(threadId, { role: 'tool', type: 'tool_error', params: toolParams, result: errorMessage, name: toolName, content: errorMessage, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
+
+			// [Trace] Async record tool call failure (fire-and-forget)
+			this._traceCollectorService.recordToolCall(threadId, (this.state.allThreads[threadId]?.messages.length ?? 1) - 1, {
+				toolName: toolName,
+				toolParams: JSON.stringify(opts.unvalidatedToolParams).substring(0, 500),
+				toolResult: errorMessage?.substring(0, 500),
+				toolSuccess: false,
+				duration: perfNow() - tAll0,
+			});
+
 			return {}
 		}
 
 		// 4. stringify the result to give to the LLM
 		const stringifyStart = perfNow()
 		try {
-			// 优化：移除 waitIdle() 延迟，直接执行字符串化，不阻塞工具调用完成后的继续流程
-			// waitIdle() 最多等待300ms，会严重影响响应速度
+			// Optimization: removed waitIdle() delay, stringify directly without blocking post-tool-call flow
+			// waitIdle() waits up to 300ms, severely impacting response speed
 			if (isBuiltInTool) {
 				toolResultStr = this._toolsService.stringOfResult[toolName](toolParams as any, toolResult as any)
 			}
@@ -1130,16 +1142,26 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			}
 		} catch (error) {
 			const errorMessage = this.toolErrMsgs.errWhenStringifying(error)
-			// 优化：移除 waitNextFrame() 延迟，立即更新错误状态
+			// Optimization: removed waitNextFrame() delay, update error state immediately
 			this._updateLatestTool(threadId, { role: 'tool', type: 'tool_error', params: toolParams, result: errorMessage, name: toolName, content: errorMessage, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
 			return {}
 		}
 		maybePerfLog('runToolCall stringifyResult', perfNow() - stringifyStart, { threadId, traceId, toolName })
 
 		// 5. add to history and keep going
-		// 优化：移除 waitNextFrame() 延迟，立即更新工具结果，让UI异步更新，不阻塞继续流程
-		// 使用 setTimeout(0) 将UI更新放到下一个事件循环，但不等待
+		// Optimization: removed waitNextFrame() delay, update tool result immediately, let UI update async without blocking
+		// Use setTimeout(0) to push UI update to next event loop tick without waiting
 		this._updateLatestTool(threadId, { role: 'tool', type: 'success', params: toolParams, result: toolResult, name: toolName, content: toolResultStr, id: toolId, rawParams: opts.unvalidatedToolParams, mcpServerName })
+
+		// [Trace] Async record tool call success (fire-and-forget)
+		this._traceCollectorService.recordToolCall(threadId, (this.state.allThreads[threadId]?.messages.length ?? 1) - 1, {
+			toolName: toolName,
+			toolParams: JSON.stringify(opts.unvalidatedToolParams).substring(0, 500),
+			toolResult: toolResultStr?.substring(0, 500),
+			toolSuccess: true,
+			duration: perfNow() - tAll0,
+		});
+
 		maybePerfLog('runToolCall total', perfNow() - tAll0, { threadId, traceId, toolName })
 		return {}
 	};
@@ -1162,7 +1184,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		const traceId = this._getPerfTraceId(threadId)
 		const tAgent0 = perfNow()
 
-		// 清理之前的错误状态，确保新消息可以正常发送
+		// Clear previous error state to ensure new messages can be sent normally
 		if (this.streamState[threadId]?.error) {
 			this._setStreamState(threadId, undefined)
 		}
@@ -1194,35 +1216,35 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		// tool use loop
 		while (shouldSendAnotherMessage) {
 			const tIter0 = perfNow()
-			const tThinkingStart = perfNow() // Thinking 状态开始时间
+			const tThinkingStart = perfNow() // Thinking state start time
 			// false by default each iteration
 			shouldSendAnotherMessage = false
 			isRunningWhenEnd = undefined
 			nMessagesSent += 1
 
-			// 优化：如果状态还不是LLM（比如第一次循环），立即设置为LLM，让用户看到"Thinking..."状态
-			// 如果已经是LLM（比如工具调用完成后设置的），保持LLM状态
+			// Optimization: if state is not yet LLM (e.g. first loop), set to LLM immediately so user sees "Thinking..."
+			// If already LLM (e.g. set after tool call completes), keep LLM state
 			if (this.streamState[threadId]?.isRunning !== 'LLM') {
 				this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null }, interrupt: idleInterruptor })
 			}
 			const tAfterSetState = perfNow()
 			debugThinkingLog('1. Set Thinking state', tAfterSetState - tThinkingStart, { threadId, nMessagesSent })
 
-			const chatMessages = this.state.allThreads[threadId]?.messages ?? []
+			let chatMessages = this.state.allThreads[threadId]?.messages ?? []
 			const tAfterGetMessages = perfNow()
 			debugThinkingLog('2. Get chat messages', tAfterGetMessages - tAfterSetState, { messageCount: chatMessages.length })
 
-			// 响应式限流：不预等待，只检查是否在 429 错误冷却期内
-			// 宁可偶尔触发 429 重试，也不要让用户长时间等待
+			// Reactive rate limiting: no pre-wait, only check if in 429 error cooldown period
+			// Better to occasionally trigger 429 retries than to make users wait too long
 			const tBeforeTPMCheck = perfNow()
 			let tpmCooldownWait = 0
 			if (modelSelection) {
-				// 只检查是否在 429 错误冷却期内，不进行预测式限流
+				// Only check if in 429 error cooldown period, no predictive rate limiting
 				tpmCooldownWait = tpmRateLimiter.getWaitTime(modelSelection.providerName, 0)
 				if (tpmCooldownWait > 0) {
 					await timeout(tpmCooldownWait)
 				}
-				// 记录请求开始
+				// Record request start
 				tpmRateLimiter.recordRequestStart(modelSelection.providerName)
 			}
 			const tAfterTPMCheck = perfNow()
@@ -1230,7 +1252,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				debugThinkingLog('3. TPM cooldown wait', tAfterTPMCheck - tBeforeTPMCheck, { cooldownWait: `${(tpmCooldownWait / 1000).toFixed(2)}s` })
 			}
 
-			// 准备 LLM 消息（不再有预等待，直接执行）
+			// Prepare LLM messages (no pre-wait, execute directly)
 			const tPrep0 = perfNow()
 			let prepResult: { messages: any, separateSystemMessage: string | undefined }
 
@@ -1247,7 +1269,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				})
 				maybePerfLog('runChatAgent prepareLLMChatMessages', prepTime, { threadId, traceId, nMessagesSent, chatMode, chatMessages: chatMessages.length })
 			} catch (error) {
-				// 如果失败，尝试重试一次
+				// If failed, try retrying once
 				try {
 					prepResult = await this._convertToLLMMessagesService.prepareLLMChatMessages({
 						chatMessages,
@@ -1255,7 +1277,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						chatMode
 					})
 				} catch (retryError) {
-					// 如果重试也失败，设置错误状态
+					// If retry also fails, set error state
 					this._setStreamState(threadId, { isRunning: undefined, error: { message: 'Failed to prepare messages. Please try again.', fullError: retryError instanceof Error ? retryError : null } })
 					return
 				}
@@ -1273,8 +1295,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				shouldRetryLLM = false
 				nAttempts += 1
 
-				// 响应式限流：不预等待，如果收到 429 错误会在重试时处理
-				// 只在重试时检查是否在冷却期内
+				// Reactive rate limiting: no pre-wait, 429 errors handled during retry
+				// Only check cooldown period during retries
 				if (nAttempts > 1 && modelSelection) {
 					const cooldownWait = tpmRateLimiter.getWaitTime(modelSelection.providerName, 0)
 					if (cooldownWait > 0) {
@@ -1308,7 +1330,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					onText: ({ fullText, fullReasoning, toolCall }) => {
 						const tOnText = perfNow()
 						if (tOnText - tBeforeSendLLM < 100) {
-							// 第一次收到文本，记录 LLM 开始响应的时间
+							// First text received, record LLM response start time
 							debugThinkingLog('6. LLM started responding', tOnText - tBeforeSendLLM, { attempt: nAttempts })
 						}
 						this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: fullText, reasoningSoFar: fullReasoning, toolCallSoFar: toolCall ?? null }, interrupt: Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) }) })
@@ -1337,10 +1359,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null }, interrupt: Promise.resolve(() => this._llmMessageService.abort(llmCancelToken)) })
 				const tLLM0 = perfNow()
 
-				// 添加超时检测，如果LLM响应超过30秒没有开始，清理超时
-				const LLM_START_TIMEOUT = 30000 // 30秒
+				// Add timeout detection, clean up if LLM response hasn't started within 30s
+				const LLM_START_TIMEOUT = 30000 // 30 seconds
 				const llmStartTimeoutId = setTimeout(() => {
-					// 超时仅用于清理，不输出日志
+					// Timeout is only for cleanup, no logging
 				}, LLM_START_TIMEOUT)
 
 				const tBeforeWaitLLM = perfNow()
@@ -1365,16 +1387,16 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 				// llm res aborted
 				if (llmRes.type === 'llmAborted') {
-					// 优化：检测是否有未完成的任务，如果有则自动继续，而不是直接返回
+					// Optimization: detect unfinished tasks, auto-continue instead of returning directly
 					const { displayContentSoFar, reasoningSoFar, toolCallSoFar } = this.streamState[threadId]?.llmInfo ?? {}
 
-					// 如果有未完成的工具调用，自动继续执行
+					// If there's an unfinished tool call, auto-continue execution
 					if (toolCallSoFar) {
-						// 保存当前部分内容
+						// Save current partial content
 						if (displayContentSoFar || reasoningSoFar) {
 							this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar || '', reasoning: reasoningSoFar || '', anthropicReasoning: null })
 						}
-						// 自动继续执行工具调用
+						// Auto-continue tool call execution
 						const mcpTools = this._mcpService.getMCPTools()
 						const mcpTool = mcpTools?.find(t => t.name === toolCallSoFar.name)
 
@@ -1391,14 +1413,14 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 							this._setStreamState(threadId, { isRunning: 'awaiting_user' })
 						} else {
 							shouldSendAnotherMessage = true
-							// 继续循环，自动发送下一次LLM消息
+							// Continue loop, auto-send next LLM message
 							this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null }, interrupt: idleInterruptor })
 						}
-						// 继续循环，不返回
+						// Continue loop, do not return
 						continue
 					}
 
-					// 如果有部分内容但没有工具调用，保存内容并结束
+					// If there's partial content but no tool call, save content and end
 					if (displayContentSoFar || reasoningSoFar) {
 						this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar || '', reasoning: reasoningSoFar || '', anthropicReasoning: null })
 					}
@@ -1412,7 +1434,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					const { error } = llmRes
 					const isRateLimitError = tpmRateLimiter.isRateLimitError(error)
 
-					// 检测 context length 超限错误 (400: maximum context length exceeded)
+					// Detect context length exceeded error (400: maximum context length exceeded)
 					const fullErrorStr = JSON.stringify(error).toLowerCase()
 					const isContextLengthError = fullErrorStr.includes('context_length') ||
 						fullErrorStr.includes('context length') ||
@@ -1423,11 +1445,14 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						fullErrorStr.includes('input is too long') ||
 						(fullErrorStr.includes('400') && (fullErrorStr.includes('token') || fullErrorStr.includes('length')))
 
-					// Context Length 错误：积极裁剪上下文后重试
+					// Context length error: aggressively prune context and retry
+					// With Phase 4 ultimate fallback in prepareMessages, this should NEVER fail permanently
 					if (isContextLengthError) {
-						console.warn('[ChatThread] Context length exceeded, aggressively pruning and retrying...')
+						console.warn(`[ChatThread] Context length exceeded (attempt ${nAttempts}), aggressively pruning and retrying...`)
 
-						// 强制执行积极裁剪：清除所有非最近轮次的工具输出
+						// Progressive pruning strategy based on retry attempt:
+						// Attempt 1-2: Prune all tool outputs
+						// Attempt 3+: Also remove old messages from chatMessages array
 						const toolMessages = chatMessages.filter(m => m.role === 'tool')
 						for (const toolMsg of toolMessages) {
 							if (!enhancedContextManager.isToolPruned(toolMsg.id)) {
@@ -1435,10 +1460,26 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 							}
 						}
 
-						// 最多重试 2 次 context length 错误
-						if (nAttempts <= 2) {
+						// On attempt 3+, aggressively trim chatMessages to only keep recent ones
+						// This feeds fewer messages into prepareMessages, making Phase 4 fallback more effective
+						if (nAttempts >= 3 && chatMessages.length > 10) {
+							// Find the last user message — MUST keep it
+							let lastUserIdx = -1;
+							for (let k = chatMessages.length - 1; k >= 0; k--) {
+								if (chatMessages[k].role === 'user') { lastUserIdx = k; break; }
+							}
+							// Keep only the last user message + last 5 messages
+							const keepCount = Math.max(5, Math.min(10, Math.floor(chatMessages.length / (nAttempts - 1))));
+							const recentStart = Math.max(0, chatMessages.length - keepCount);
+							const kept = new Set<number>();
+							if (lastUserIdx >= 0) kept.add(lastUserIdx);
+							for (let k = recentStart; k < chatMessages.length; k++) kept.add(k);
+							chatMessages = chatMessages.filter((_, k) => kept.has(k));
+						}
+
+						// Allow up to 5 retries — with Phase 4 ultimate fallback, this should always succeed
+						if (nAttempts <= 5) {
 							shouldRetryLLM = true
-							// 重新准备消息（这次裁剪过的工具输出会被替换为摘要）
 							try {
 								prepResult = await this._convertToLLMMessagesService.prepareLLMChatMessages({
 									chatMessages,
@@ -1446,23 +1487,69 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 									chatMode
 								})
 							} catch (retryError) {
-								this._setStreamState(threadId, { isRunning: undefined, error: { message: 'Context too large even after pruning. Please start a new conversation.', fullError: retryError instanceof Error ? retryError : null } })
-								return
+								// Even if prepareLLMChatMessages fails, try one last time with minimal messages
+								console.error('[ChatThread] prepareLLMChatMessages failed during retry, attempting minimal fallback')
+								// Keep only the last user message
+								const lastUserMsg = [...chatMessages].reverse().find(m => m.role === 'user')
+								if (lastUserMsg) {
+									chatMessages = [lastUserMsg]
+									try {
+										prepResult = await this._convertToLLMMessagesService.prepareLLMChatMessages({
+											chatMessages,
+											modelSelection,
+											chatMode
+										})
+									} catch {
+										this._setStreamState(threadId, { isRunning: undefined, error: { message: 'Context too large even after pruning. Please start a new conversation.', fullError: retryError instanceof Error ? retryError : null } })
+										return
+									}
+								} else {
+									this._setStreamState(threadId, { isRunning: undefined, error: { message: 'Context too large even after pruning. Please start a new conversation.', fullError: retryError instanceof Error ? retryError : null } })
+									return
+								}
 							}
 
 							this._setStreamState(threadId, {
 								isRunning: 'LLM',
 								llmInfo: {
 									displayContentSoFar: this.streamState[threadId]?.llmInfo?.displayContentSoFar || '',
-									reasoningSoFar: (this.streamState[threadId]?.llmInfo?.reasoningSoFar || '') + `\n[Context too large, compressing history and retrying...]`,
+									reasoningSoFar: (this.streamState[threadId]?.llmInfo?.reasoningSoFar || '') + `\n[Context too large, compressing history and retrying (${nAttempts}/5)...]`,
 									toolCallSoFar: null
 								},
 								interrupt: Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) })
 							})
-							continue // 用裁剪后的消息重试
+							continue // Retry with pruned messages
 						}
 						else {
-							// 裁剪后仍然超限，提示用户开始新对话
+							// This should theoretically never happen with Phase 4 fallback
+							// But as absolute last resort, log and continue without error
+							console.error('[ChatThread] Context length exceeded after all retries — this should not happen with Phase 4 fallback')
+							this._traceCollectorService.recordError(threadId, (this.state.allThreads[threadId]?.messages.length ?? 1) - 1, 'Context too large even after all pruning phases');
+
+							// One final attempt: send only the last user message
+							const lastUserMsg = [...chatMessages].reverse().find(m => m.role === 'user')
+							if (lastUserMsg) {
+								try {
+									prepResult = await this._convertToLLMMessagesService.prepareLLMChatMessages({
+										chatMessages: [lastUserMsg],
+										modelSelection,
+										chatMode
+									})
+									shouldRetryLLM = true
+									this._setStreamState(threadId, {
+										isRunning: 'LLM',
+										llmInfo: {
+											displayContentSoFar: '',
+											reasoningSoFar: '[History cleared due to context limit. Responding to your latest message only.]',
+											toolCallSoFar: null
+										},
+										interrupt: Promise.resolve(() => { if (llmCancelToken) this._llmMessageService.abort(llmCancelToken) })
+									})
+									continue
+								} catch {
+									// Truly impossible — even a single message doesn't fit
+								}
+							}
 							this._setStreamState(threadId, {
 								isRunning: undefined,
 								error: { message: 'The conversation context is too large. Please start a new conversation or reduce the number of selected files/folders.', fullError: error instanceof Error ? error : null }
@@ -1472,13 +1559,13 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						}
 					}
 
-					// 响应式限流：只在收到 429 错误时才进行限流
+					// Reactive rate limiting: only throttle when 429 error is received
 					if (isRateLimitError && modelSelection) {
-						// 使用新的 handleRateLimitError 方法，它会从 API 响应中提取 retry-after
+						// Use handleRateLimitError method which extracts retry-after from API response
 						const waitTime = tpmRateLimiter.handleRateLimitError(modelSelection.providerName, error)
 
 						shouldRetryLLM = true
-						// 保持 LLM 运行状态，给用户"正在思考"的感觉
+						// Keep LLM running state to give user a "thinking..." feeling
 						this._setStreamState(threadId, {
 							isRunning: 'LLM',
 							llmInfo: {
@@ -1495,12 +1582,12 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 							this._setStreamState(threadId, undefined)
 							return
 						}
-						// 重置尝试次数，允许无限重试 rate limit 错误
+						// Reset attempt count, allow unlimited retries for rate limit errors
 						nAttempts = Math.max(0, nAttempts - 1)
-						continue // 静默重试
+						continue // Silent retry
 					}
 
-					// 非 rate limit 错误：使用原有逻辑
+					// Non-rate-limit error: use original logic
 					if (nAttempts < CHAT_RETRIES) {
 						shouldRetryLLM = true
 						this._setStreamState(threadId, { isRunning: 'idle', interrupt: idleInterruptor })
@@ -1520,6 +1607,9 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						this._addMessageToThread(threadId, { role: 'assistant', displayContent: displayContentSoFar, reasoning: reasoningSoFar, anthropicReasoning: null })
 						if (toolCallSoFar) this._addMessageToThread(threadId, { role: 'interrupted_streaming_tool', name: toolCallSoFar.name, mcpServerName: this._computeMCPServerOfToolName(toolCallSoFar.name) })
 
+						// [Trace] Async record final LLM error (fire-and-forget)
+						this._traceCollectorService.recordError(threadId, (this.state.allThreads[threadId]?.messages.length ?? 1) - 1, error?.message || 'LLM error after max retries');
+
 						this._setStreamState(threadId, { isRunning: undefined, error: error })
 						this._addUserCheckpoint({ threadId })
 						return
@@ -1530,12 +1620,27 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				const tBeforeProcessSuccess = perfNow()
 				const { toolCall, info } = llmRes
 
-				// 记录成功请求（重置 rate limit 错误计数）
+				// Record successful request (reset rate limit error count)
 				if (modelSelection) {
 					tpmRateLimiter.recordSuccess(modelSelection.providerName)
 				}
 
 				this._addMessageToThread(threadId, { role: 'assistant', displayContent: info.fullText, reasoning: info.fullReasoning, anthropicReasoning: info.anthropicReasoning })
+
+				// [Trace] Async record assistant reply and LLM call (fire-and-forget)
+				this._traceCollectorService.recordAssistantMessage(
+					threadId,
+					(this.state.allThreads[threadId]?.messages.length ?? 1) - 1,
+					info.fullText,
+					modelSelection?.modelName,
+					modelSelection?.providerName
+				);
+				this._traceCollectorService.recordLLMCall(threadId, (this.state.allThreads[threadId]?.messages.length ?? 1) - 1, {
+					model: modelSelection?.modelName,
+					provider: modelSelection?.providerName,
+					duration: llmWaitTime,
+				});
+
 				const tAfterAddMessage = perfNow()
 				debugThinkingLog('8. Process LLM success & add message', tAfterAddMessage - tBeforeProcessSuccess, {
 					hasToolCall: !!toolCall,
@@ -1551,31 +1656,31 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					const mcpTools = this._mcpService.getMCPTools()
 					const mcpTool = mcpTools?.find(t => t.name === toolCall.name)
 
-					// 优化：在工具调用执行时并行预热系统消息和目录字符串缓存
-					// 在工具执行期间就开始准备下一次可能需要的资源
-					// 系统消息和目录字符串的获取可以并行执行，不依赖于工具结果
+					// Optimization: warm up system message and directory string cache in parallel during tool execution
+					// Start preparing resources for the next iteration during tool execution
+					// System message and directory string fetching can run in parallel, independent of tool result
 					const systemMessageWarmupPromise = (async () => {
 						try {
-							// 预热系统消息生成（会使用缓存，但确保缓存已加载）
+							// Warm up system message generation (uses cache, but ensures cache is loaded)
 							const { providerName, modelName } = modelSelection || { providerName: null, modelName: null }
 							if (providerName && modelName) {
-								// 触发系统消息生成（会使用缓存），但不等待结果
+								// Trigger system message generation (uses cache), but don't wait for result
 								this._convertToLLMMessagesService.prepareLLMChatMessages({
-									chatMessages: chatMessages.slice(-1), // 只使用最后一条消息来触发系统消息生成
+									chatMessages: chatMessages.slice(-1), // Only use last message to trigger system message generation
 									modelSelection,
 									chatMode
-								}).catch(() => { }) // 忽略错误，这只是预热
+								}).catch(() => { }) // Ignore errors, this is just warmup
 							}
 						} catch (error) {
-							// 忽略预热错误
+							// Ignore warmup errors
 						}
 					})()
 
 					const tTool0 = perfNow()
-					// 优化：工具调用和系统消息预热并行执行
+					// Optimization: tool call and system message warmup run in parallel
 					const [toolCallResult, _] = await Promise.all([
 						this._runToolCall(threadId, toolCall.name, toolCall.id, mcpTool?.mcpServerName, { preapproved: false, unvalidatedToolParams: toolCall.rawParams }),
-						systemMessageWarmupPromise // 并行预热，不阻塞工具调用
+						systemMessageWarmupPromise // Parallel warmup, does not block tool call
 					])
 					const { awaitingUserApproval, interrupted } = toolCallResult
 					const tAfterToolCall = perfNow()
@@ -1596,12 +1701,12 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 					}
 					else {
 						shouldSendAnotherMessage = true
-						// 优化：工具调用完成后，立即设置状态为LLM，让用户看到"Thinking..."状态，而不是等待
-						// 这样用户能立即感知到系统正在处理，而不是感觉卡住了
+						// Optimization: after tool call completes, set state to LLM immediately so user sees "Thinking..." instead of waiting
+						// This way user immediately perceives the system is processing, rather than feeling stuck
 						this._setStreamState(threadId, { isRunning: 'LLM', llmInfo: { displayContentSoFar: '', reasoningSoFar: '', toolCallSoFar: null }, interrupt: idleInterruptor })
 					}
 				} else {
-					// 没有工具调用，Thinking 状态结束
+					// No tool call, Thinking state ends
 					const tThinkingEnd = perfNow()
 					const totalThinkingTime = tThinkingEnd - tThinkingStart
 					debugThinkingLog('✅ Thinking completed (no tool call)', totalThinkingTime, {
@@ -1627,6 +1732,11 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 		// add checkpoint before the next user message
 		if (!isRunningWhenEnd) this._addUserCheckpoint({ threadId })
+
+		// [Trace] Conversation round ended, async end trace (fire-and-forget)
+		if (!isRunningWhenEnd) {
+			this._traceCollectorService.endTraceForThread(threadId);
+		}
 
 		// capture number of messages sent
 		this._metricsService.capture('Agent Loop Done', { nMessagesSent, chatMode })
@@ -1655,10 +1765,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 	private _addCheckpoint(threadId: string, checkpoint: CheckpointEntry) {
 
-		// 在实际添加前再次检查，防止竞态条件导致的重复 checkpoint
+		// Re-check before actually adding, prevent duplicate checkpoints from race conditions
 		const thread = this.state.allThreads[threadId]
 		if (thread && thread.messages.length > 0) {
-			// 查找最近的 checkpoint
+			// Find the most recent checkpoint
 			let lastCheckpointIndex = -1
 			for (let i = thread.messages.length - 1; i >= 0; i--) {
 				if (thread.messages[i].role === 'checkpoint') {
@@ -1668,13 +1778,13 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			}
 
 			if (lastCheckpointIndex >= 0) {
-				// 检查最后一个 checkpoint 之后是否有真正的用户或AI消息
+				// Check if there are real user or AI messages after the last checkpoint
 				const messagesSinceCheckpoint = thread.messages.slice(lastCheckpointIndex + 1)
 
-				// 只有真正的用户消息才算数，排除 continuation 请求
+				// Only real user messages count, exclude continuation requests
 				const hasRealUserMessages = messagesSinceCheckpoint.some(msg => {
 					if (msg.role === 'user') {
-						// 检查是否是 continuation 请求
+						// Check if this is a continuation request
 						let content = ''
 						try {
 							if (typeof msg.content === 'string') {
@@ -1689,7 +1799,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						}
 
 
-						// 如果包含自动生成的内容，则不算真正的用户消息
+						// If contains auto-generated content, it's not a real user message
 						const isContinuation = content.includes('Requesting UI') ||
 							content.includes('continuation request') ||
 							content.includes('馃摛') ||
@@ -1943,8 +2053,8 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		const traceId = this._getPerfTraceId(threadId)
 		const beforeLen = thread.messages.length
 
-		// 检查是否存在连续的 checkpoint（中间没有真正的用户或AI消息）
-		// 从后往前查找最近的 checkpoint
+		// Check for consecutive checkpoints (no real user or AI messages in between)
+		// Search backwards for the most recent checkpoint
 		let lastCheckpointIndex = -1
 		for (let i = thread.messages.length - 1; i >= 0; i--) {
 			if (thread.messages[i].role === 'checkpoint') {
@@ -1954,13 +2064,13 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		}
 
 		if (lastCheckpointIndex >= 0) {
-			// 检查最后一个 checkpoint 之后是否有真正的用户或AI消息
+			// Check if there are real user or AI messages after the last checkpoint
 			const messagesSinceCheckpoint = thread.messages.slice(lastCheckpointIndex + 1)
 
-			// 检查是否有真正的用户消息和有效的AI输出
+			// Check if there are real user messages and valid AI output
 			const hasRealUserMessages = messagesSinceCheckpoint.some(msg => {
 				if (msg.role === 'user') {
-					// 检查是否是 continuation 请求
+					// Check if this is a continuation request
 					let content = ''
 					try {
 						if (typeof msg.content === 'string') {
@@ -1974,7 +2084,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						content = ''
 					}
 
-					// 如果包含自动生成的内容，则不算真正的用户消息
+					// If contains auto-generated content, it's not a real user message
 					const isContinuation = content.includes('Requesting UI') ||
 						content.includes('continuation request') ||
 						content.includes('馃摛') ||
@@ -1992,20 +2102,20 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				return msg.role === 'assistant'
 			})
 
-			// 检查是否有有效的输出（工具调用、设计输出或任何assistant响应）
+			// Check for valid output (tool calls, design output, or any assistant response)
 			const hasValidOutput = messagesSinceCheckpoint.some(msg => {
-				// 工具调用（edit_file, rewrite_file 等）算作有效输出
+				// Tool calls (edit_file, rewrite_file, etc.) count as valid output
 				if (msg.role === 'tool' && (msg.type === 'success' || msg.type === 'running_now')) {
 					return true
 				}
-				// assistant 消息算作有效输出
+				// Assistant messages count as valid output
 				if (msg.role === 'assistant') {
 					return true
 				}
 				return false
 			})
 
-			// 只有当既有真正的用户消息，又有有效的输出时，才创建新的checkpoint
+			// Only create a new checkpoint when there are both real user messages and valid output
 			if (!hasRealUserMessages || !hasValidOutput) {
 				return
 			}
@@ -2469,10 +2579,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 	}
 
 	/**
-	 * 异步分析图片，带流式反馈（不卡 UI）
+	 * Async image analysis with streaming feedback (non-blocking UI)
 	 */
 	private async _analyzeImagesWithProgress(images: ImageAttachment[], threadId: string): Promise<string> {
-		// 设置流状态为运行中，确保 UI 显示运行状态指示器
+		// Set stream state to running, ensure UI shows running status indicator
 		this._setStreamState(threadId, {
 			isRunning: 'tool',
 			interrupt: Promise.resolve(() => { }),
@@ -2480,20 +2590,20 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 				toolName: 'analyze_image' as any,
 				toolParams: {} as any,
 				id: `image-analysis-${Date.now()}`,
-				content: '正在分析图片...',
+				content: 'Analyzing images...',
 				rawParams: {},
 				mcpServerName: undefined
 			}
 		});
 
-		// 创建初始状态消息
+		// Create initial status message
 		const statusMessageId = `analysis-status-${Date.now()}`;
 		const initialStatusMessage: ChatMessage = {
 			role: 'assistant',
-			displayContent: `🔍 **正在分析 ${images.length} 张图片...**\n\n⏳ 准备中...`,
+			displayContent: `🔍 **Analyzing ${images.length} images...**\n\n⏳ Preparing...`,
 			reasoning: '',
 			anthropicReasoning: null,
-			// @ts-ignore - 添加 ID 用于后续更新
+			// @ts-ignore - Add ID for subsequent updates
 			tempId: statusMessageId
 		};
 		this._addMessageToThread(threadId, initialStatusMessage);
@@ -2503,16 +2613,16 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			const img = images[i];
 			const imageNum = i + 1;
 
-			// 只使用上传后的URL，不再使用base64
+			// Only use uploaded URL, no longer use base64
 			if (!img.uploadedUrl || img.uploadStatus !== 'uploaded') {
-				imageAnalysisResults.push(`<<<IMAGE_ANALYSIS_START:图片 ${imageNum} 分析失败>>>\n图片尚未上传完成\n<<<IMAGE_ANALYSIS_END>>>`);
+				imageAnalysisResults.push(`<<<IMAGE_ANALYSIS_START:Image ${imageNum} analysis failed>>>\nImage not yet uploaded\n<<<IMAGE_ANALYSIS_END>>>`);
 				continue;
 			}
 			const imageSource = img.uploadedUrl;
 
-			// 更新状态：正在分析当前图片
+			// Update status: analyzing current image
 			this._updateAnalysisStatus(threadId, statusMessageId,
-				`🔍 **正在分析 ${images.length} 张图片...**\n\n📊 正在分析第 ${imageNum}/${images.length} 张图片...\n\n${imageAnalysisResults.length > 0 ? '\n✅ 已完成 ' + imageAnalysisResults.length + ' 张' : ''}`);
+				`🔍 **Analyzing ${images.length} images...**\n\n📊 Analyzing image ${imageNum}/${images.length}...\n\n${imageAnalysisResults.length > 0 ? '\n✅ Completed ' + imageAnalysisResults.length + ' images' : ''}`);
 
 			try {
 				const { result } = await this._toolsService.callTool['analyze_image']({
@@ -2522,45 +2632,45 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 
 				if (analysisResult.success) {
 					const analysis = analysisResult.analysis || analysisResult.localAnalysis || 'Analysis completed';
-					// 使用特殊标记包装图片分析结果，后续会被渲染为可折叠组件
-					const collapsibleResult = `<<<IMAGE_ANALYSIS_START:图片 ${imageNum} 分析结果>>>\n${analysis}\n<<<IMAGE_ANALYSIS_END>>>`;
+					// Wrap image analysis result with special markers, will be rendered as collapsible component
+					const collapsibleResult = `<<<IMAGE_ANALYSIS_START:Image ${imageNum} analysis result>>>\n${analysis}\n<<<IMAGE_ANALYSIS_END>>>`;
 					imageAnalysisResults.push(collapsibleResult);
 				} else {
-					const errorDetails = `<<<IMAGE_ANALYSIS_START:图片 ${imageNum} 分析失败>>>\n${analysisResult.error || 'Unknown error'}\n<<<IMAGE_ANALYSIS_END>>>`;
+					const errorDetails = `<<<IMAGE_ANALYSIS_START:Image ${imageNum} analysis failed>>>\n${analysisResult.error || 'Unknown error'}\n<<<IMAGE_ANALYSIS_END>>>`;
 					imageAnalysisResults.push(errorDetails);
 				}
 			} catch (error: unknown) {
 				const errorMsg = error instanceof Error ? error.message : String(error);
-				const errorDetails = `<<<IMAGE_ANALYSIS_START:图片 ${imageNum} 分析错误>>>\n${errorMsg}\n<<<IMAGE_ANALYSIS_END>>>`;
+				const errorDetails = `<<<IMAGE_ANALYSIS_START:Image ${imageNum} analysis error>>>\n${errorMsg}\n<<<IMAGE_ANALYSIS_END>>>`;
 				imageAnalysisResults.push(errorDetails);
 			}
 		}
 
-		// 更新为最终结果
+		// Update with final results
 		const finalResults = imageAnalysisResults.length > 0 ? imageAnalysisResults.join('\n\n') : '';
 		this._updateAnalysisStatus(threadId, statusMessageId,
-			`✅ **图片分析完成** ${finalResults}\n\n---\n\n🤖 正在处理您的问题...`);
+			`✅ **Image analysis complete** ${finalResults}\n\n---\n\n🤖 Processing your question...`);
 
-		// 清除流状态
+		// Clear stream state
 		this._setStreamState(threadId, { isRunning: 'idle', interrupt: 'not_needed' });
 
 		return finalResults;
 	}
 
 	/**
-	 * 更新分析状态消息
+	 * Update analysis status message
 	 */
 	private _updateAnalysisStatus(threadId: string, tempId: string, newContent: string): void {
 		const thread = this.state.allThreads[threadId];
 		if (!thread) return;
 
-		// 找到状态消息并更新
+		// Find status message and update
 		const messageIndex = thread.messages.findIndex((msg: any) => msg.tempId === tempId);
 		if (messageIndex !== -1) {
 			const updatedMessages = [...thread.messages];
 			const existingMsg = updatedMessages[messageIndex];
 
-			// 只更新 displayContent，保持其他字段不变
+			// Only update displayContent, keep other fields unchanged
 			if (existingMsg.role === 'assistant') {
 				updatedMessages[messageIndex] = {
 					...existingMsg,
@@ -2609,10 +2719,10 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		const tBuild0 = perfNow()
 		const userMessageContent = await chat_userMessageContent(instructions, currSelns, { directoryStrService: this._directoryStringService, fileService: this._fileService }) // user message + names of files (NOT content)
 		maybePerfLog('userMessage build chat_userMessageContent', perfNow() - tBuild0, { threadId, traceId, selections: currSelns.length })
-		// 清理图片数据：上传成功后只保留URL，不存储base64（节省存储空间）
+		// Clean up image data: after successful upload, only keep URL, don't store base64 (save storage space)
 		const cleanedImages = images?.map(img => {
 			if (img.uploadedUrl && img.uploadStatus === 'uploaded') {
-				// 上传成功，清除base64Data只保留URL和缩略图
+				// Upload successful, clear base64Data and only keep URL and thumbnail
 				const { base64Data, ...rest } = img;
 				return rest;
 			}
@@ -2624,15 +2734,20 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 			content: userMessageContent,
 			displayContent: displayMessage || instructions, // Use displayMessage if provided, otherwise use instructions
 			selections: currSelns,
-			images: cleanedImages, // 添加图片附件（只保留URL，不存储base64）
+			images: cleanedImages, // Add image attachments (only keep URL, don't store base64)
 			state: defaultMessageState
 		}
 		this._addMessageToThread(threadId, userHistoryElt)
 		maybePerfLog('userMessage addMessageToThread', perfNow() - t0, { threadId, traceId })
 
+		// [Trace] Async record user message (fire-and-forget, does not affect main flow)
+		const chatMode = this._settingsService.state.globalSettings.chatMode;
+		this._traceCollectorService.startTrace(threadId, { chatMode });
+		this._traceCollectorService.recordUserMessage(threadId, thread.messages.length - 1, userMessageContent);
+
 		this._setThreadState(threadId, {
 			currCheckpointIdx: null, // no longer at a checkpoint because started streaming
-			hasAutoAddedFilesThisRound: false // 重置标志，允许下一轮对话自动添加文件
+			hasAutoAddedFilesThisRound: false // Reset flag, allow auto-adding files in next round
 		})
 
 		this._wrapRunAgentToNotify(
@@ -2653,32 +2768,32 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 		const thread = this.state.allThreads[threadId];
 		if (!thread) return
 
-		// 检查 ownProvider 模型状态（仅记录使用，不阻止发送）
+		// Check ownProvider model status (only record usage, don't block sending)
 		const { modelSelection } = this._currentModelSelectionProps();
 
 		if (modelSelection && modelSelection.providerName === 'ownProvider') {
-			// 检查 model_access 状态，仅记录警告，不阻止发送
-			// 智能上下文管理会自动处理 token 溢出，不需要阻止用户发送消息
+			// Check model_access status, only log warnings, don't block sending
+			// Smart context management auto-handles token overflow, no need to block user messages
 			if (!isOwnProviderEnabled()) {
 				const accessStatus = getOwnProviderModelAccess();
-				// 仅在认证失败时阻止，其他情况（连接断开等）不阻止
+				// Only block on auth failure, don't block for other cases (disconnection, etc.)
 				if (accessStatus.reason === '认证失败') {
 					this._notificationService.notify({
 						severity: Severity.Warning,
-						message: `模型认证失败，请检查配置`
+						message: `Model authentication failed, please check configuration`
 					});
 					return;
 				}
-				// 其他情况只显示警告，不阻止发送
-				const reason = accessStatus.reason || '网络状态异常';
-				console.warn(`[ModelAccess] ⚠️ ${reason}，尝试继续对话...`);
+				// Other cases only show warning, don't block sending
+				const reason = accessStatus.reason || 'Network status abnormal';
+				console.warn(`[ModelAccess] ⚠️ ${reason}, attempting to continue conversation...`);
 			}
 
-			// 通过 WebSocket 发送模型使用记录（同步，不阻塞）
+			// Send model usage record via WebSocket (sync, non-blocking)
 			const userId = getUserId();
 			const modelName = modelSelection.modelName;
 
-			// 使用 WebSocket 发送使用记录（失败不阻止发送）
+			// Send usage record via WebSocket (failure doesn't block sending)
 			reportModelUsage(userId, modelName);
 		}
 
@@ -2727,7 +2842,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						this._addUserCheckpoint({ threadId });
 					}
 
-					// 立即添加用户消息到 UI（不阻塞）
+					// Immediately add user message to UI (non-blocking)
 					const instructions = userMessage;
 					const currSelns: StagingSelectionItem[] = _chatSelections ?? thread.state.stagingSelections;
 
@@ -2737,7 +2852,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						content: userMessageContent,
 						displayContent: displayMessage || instructions,
 						selections: currSelns,
-						images: images, // 保存图片以便在UI中展示，虽然不会发送给模型
+						images: images, // Save images for UI display, although they won't be sent to the model
 						state: defaultMessageState
 					};
 					this._addMessageToThread(threadId, userHistoryElt);
@@ -2747,20 +2862,20 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 						hasAutoAddedFilesThisRound: false
 					});
 
-					// 异步分析图片，带进度反馈（不阻塞 UI）
+					// Async analyze images with progress feedback (non-blocking UI)
 					(async () => {
 						try {
 							const analysisResults = await this._analyzeImagesWithProgress(images, threadId);
 
-							// 分析完成后，使用增强的消息内容启动模型响应
+							// After analysis completes, start model response with enhanced message content
 							const enhancedUserMessage = analysisResults
-								? `${userMessageContent}\n\n---\n\n📸 **图片已预先分析完成（请勿再次调用 analyze_image 工具）：**\n\n${analysisResults}\n\n---\n\n**重要提示**：图片分析已完成，请直接使用以上分析结果回答用户问题，不要调用 analyze_image 工具。`
+								? `${userMessageContent}\n\n---\n\n📸 **Images have been pre-analyzed (do NOT call analyze_image tool again):**\n\n${analysisResults}\n\n---\n\n**Important**: Image analysis is complete. Please use the above analysis results directly to answer the user's question. Do NOT call the analyze_image tool.`
 								: userMessageContent;
 
-							// 更新用户消息内容（包含分析结果）
+							// Update user message content (including analysis results)
 							const updatedThread = this.state.allThreads[threadId];
 							if (updatedThread) {
-								// 从后往前查找最后一条用户消息（更可靠）
+								// Search backwards for the last user message (more reliable)
 								let lastUserMsgIndex = -1;
 								for (let i = updatedThread.messages.length - 1; i >= 0; i--) {
 									if (updatedThread.messages[i].role === 'user') {
@@ -2789,7 +2904,7 @@ class ChatThreadService extends Disposable implements IChatThreadService {
 								}
 							}
 
-							// 启动模型响应
+							// Start model response
 							this._wrapRunAgentToNotify(
 								this._runChatAgent({ threadId, ...this._currentModelSelectionProps() }),
 								threadId

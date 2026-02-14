@@ -714,6 +714,111 @@ const _tryParseJsonFromString = (input: unknown): any | null => {
 		}
 	}
 
+	// ================ Truncated JSON repair ================
+	// When LLM output is cut off mid-JSON (e.g. long papers), try to repair it
+	// by closing unclosed braces/brackets and removing trailing incomplete values
+	const repaired = _tryRepairTruncatedJson(normalizedCandidate);
+	if (repaired) return repaired;
+
+	return null;
+};
+
+/**
+ * Attempt to repair truncated JSON (e.g. from LLM output cutoff on long papers).
+ * Uses multiple strategies with increasing aggressiveness.
+ */
+const _tryRepairTruncatedJson = (input: string): any | null => {
+	if (!input || input.length < 10) return null;
+
+	const firstBrace = input.indexOf('{');
+	if (firstBrace === -1) return null;
+
+	// Strategy 1: Close unclosed braces/brackets after cleaning trailing garbage
+	const result = _repairByClosing(input, firstBrace);
+	if (result) return result;
+
+	// Strategy 2: For severely truncated JSON, try progressively shorter substrings
+	const json = input.slice(firstBrace);
+	const lastGoodBoundaries = [
+		json.lastIndexOf('}'),
+		json.lastIndexOf(']'),
+		json.lastIndexOf('"'),
+	].filter(i => i > 0).sort((a, b) => b - a);
+
+	for (const boundary of lastGoodBoundaries) {
+		const candidate = json.slice(0, boundary + 1);
+		const repaired = _repairByClosing(candidate, 0);
+		if (repaired) return repaired;
+	}
+
+	return null;
+};
+
+const _repairByClosing = (input: string, startIdx: number): any | null => {
+	let json = input.slice(startIdx);
+
+	let openBraces = 0, openBrackets = 0;
+	let inString = false, escaped = false;
+	for (let i = 0; i < json.length; i++) {
+		const ch = json[i];
+		if (escaped) { escaped = false; continue; }
+		if (ch === '\\') { escaped = true; continue; }
+		if (ch === '"') { inString = !inString; continue; }
+		if (inString) continue;
+		if (ch === '{') openBraces++;
+		else if (ch === '}') openBraces--;
+		else if (ch === '[') openBrackets++;
+		else if (ch === ']') openBrackets--;
+	}
+
+	if (openBraces === 0 && openBrackets === 0) return null;
+	if (openBraces < 0 || openBrackets < 0) return null;
+
+	if (inString) json += '"';
+
+	// Remove trailing incomplete content with multiple patterns
+	const cleanPatterns = [
+		/,\s*"[^"]*"?\s*:?\s*"?[^"]*$/,
+		/,\s*\{[^}]*$/,
+		/,\s*\[[^\]]*$/,
+		/,\s*"[^"]*$/,
+	];
+	for (const pattern of cleanPatterns) {
+		const cleaned = json.replace(pattern, '');
+		if (cleaned.length !== json.length && cleaned.length > 5) {
+			json = cleaned;
+			break;
+		}
+	}
+
+	json = json.replace(/,\s*$/, '');
+
+	// Re-count
+	openBraces = 0; openBrackets = 0; inString = false; escaped = false;
+	for (let i = 0; i < json.length; i++) {
+		const ch = json[i];
+		if (escaped) { escaped = false; continue; }
+		if (ch === '\\') { escaped = true; continue; }
+		if (ch === '"') { inString = !inString; continue; }
+		if (inString) continue;
+		if (ch === '{') openBraces++;
+		else if (ch === '}') openBraces--;
+		else if (ch === '[') openBrackets++;
+		else if (ch === ']') openBrackets--;
+	}
+
+	if (inString) json += '"';
+	for (let i = 0; i < openBrackets; i++) json += ']';
+	for (let i = 0; i < openBraces; i++) json += '}';
+
+	try {
+		const parsed = JSON.parse(json);
+		if (parsed && typeof parsed === 'object') {
+			console.warn('[_tryRepairTruncatedJson] Successfully repaired truncated JSON (' + input.length + ' chars)');
+			return parsed;
+		}
+	} catch { /* repair failed */ }
+
 	return null;
 };
 
@@ -1440,10 +1545,7 @@ export class ToolsService implements IToolsService {
 				const { content: contentUnknown, backup: backupUnknown, replacements: replacementsUnknown } = params;
 
 				const uri = validateURIInWorkspace(uriUnknown);
-				const content = validateStr('content', contentUnknown) || '';
-				// Default backup to false
-				const backup = String(backupUnknown) === 'true';
-				// Parse replacements array
+				// Parse replacements array first — content can be empty when using replacements mode
 				let replacements: Array<{ find: string, replace: string, bold?: boolean, italic?: boolean }> | undefined;
 				if (replacementsUnknown) {
 					if (typeof replacementsUnknown === 'string') {
@@ -1456,6 +1558,13 @@ export class ToolsService implements IToolsService {
 						replacements = replacementsUnknown;
 					}
 				}
+				// Allow empty content when replacements are provided (incremental edit mode)
+				const hasReplacements = replacements && replacements.length > 0;
+				const content = hasReplacements
+					? (typeof contentUnknown === 'string' ? contentUnknown : '')
+					: validateStr('content', contentUnknown);
+				// Default backup to false
+				const backup = String(backupUnknown) === 'true';
 
 				return { uri, content, backup, replacements };
 			},
@@ -3627,6 +3736,11 @@ export class ToolsService implements IToolsService {
 				}
 				if (result.slides) {
 					output += `🎯 Slides: ${result.slides}\n`;
+				}
+
+				if (result.wasJsonRepaired) {
+					output += `\n⚠️ WARNING: ${result.warning || 'Document was created from repaired truncated JSON. Some sections may be incomplete.'}\n`;
+					output += `💡 TIP: Use edit_document with the remaining content to complete the document.\n`;
 				}
 
 				output += `\n✨ Professional document created successfully!`;

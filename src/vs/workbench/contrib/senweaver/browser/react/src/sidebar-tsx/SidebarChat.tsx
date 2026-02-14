@@ -22,7 +22,7 @@ import { ChatMode, displayInfoOfProviderName, FeatureName, isFeatureNameDisabled
 import { ICommandService } from '../../../../../../../platform/commands/common/commands.js';
 import { WarningBox } from '../senweaver-settings-tsx/WarningBox.js';
 import { getModelCapabilities, getIsReasoningEnabledState } from '../../../../common/modelCapabilities.js';
-import { AlertTriangle, File, Ban, Check, ChevronRight, Dot, FileIcon, Pencil, Undo, Undo2, X, Flag, Copy as CopyIcon, Info, CirclePlus, Ellipsis, CircleEllipsis, Folder, ALargeSmall, TypeOutline, Text, MessageSquare, Bot, BookOpen, Palette, Terminal } from 'lucide-react';
+import { AlertTriangle, File, Ban, Check, ChevronRight, Dot, FileIcon, Pencil, Undo, Undo2, X, Flag, Copy as CopyIcon, Info, CirclePlus, Ellipsis, CircleEllipsis, Folder, ALargeSmall, TypeOutline, Text, MessageSquare, Bot, BookOpen, Palette, Terminal, ThumbsUp, ThumbsDown } from 'lucide-react';
 import { ChatMessage, CheckpointEntry, StagingSelectionItem, ToolMessage, ImageAttachment } from '../../../../common/chatThreadServiceTypes.js';
 import { approvalTypeOfBuiltinToolName, BuiltinToolCallParams, BuiltinToolName, ToolName, LintErrorItem, ToolApprovalType, toolApprovalTypes } from '../../../../common/toolsServiceTypes.js';
 import { CopyButton, EditToolAcceptRejectButtonsHTML, IconShell1, JumpToFileButton, JumpToTerminalButton, StatusIndicator, StatusIndicatorForApplyButton, useApplyStreamState, useEditToolStreamState } from '../markdown/ApplyBlockHoverButtons.js';
@@ -4309,7 +4309,9 @@ const Checkpoint = ({ message, threadId, messageIdx, isCheckpointGhost, threadIs
 	const accessor = useAccessor()
 	const chatThreadService = accessor.get('IChatThreadService')
 	const clipboardService = accessor.get('IClipboardService')
+	const traceCollectorService = accessor.get('ITraceCollectorService')
 	const [copied, setCopied] = useState(false)
+	const [feedback, setFeedback] = useState<'good' | 'bad' | null>(() => traceCollectorService.getFeedback(threadId, messageIdx))
 
 	const isRunning = useChatThreadsStreamState(threadId)?.isRunning
 	const isDisabled = useMemo(() => {
@@ -4370,48 +4372,85 @@ const Checkpoint = ({ message, threadId, messageIdx, isCheckpointGhost, threadIs
 		}
 	}, [getConversationRoundContent, clipboardService])
 
+	const handleFeedback = useCallback((type: 'good' | 'bad') => {
+		const newFeedback = feedback === type ? null : type
+		setFeedback(newFeedback)
+		traceCollectorService.recordUserFeedback(threadId, messageIdx, newFeedback)
+	}, [feedback, traceCollectorService, threadId, messageIdx])
+
 	return <div
-		className={`flex items-center justify-end px-2 gap-2 ${isCheckpointGhost ? 'opacity-50' : 'opacity-100'}`}
+		className={`flex items-center justify-between px-2 ${isCheckpointGhost ? 'opacity-50' : 'opacity-100'}`}
 	>
-		{/* Copy conversation button */}
-		<div
-			className={`
-				text-senweaver-fg-3 select-none cursor-pointer
-				hover:text-senweaver-fg-1 transition-colors
-			`}
-			onClick={handleCopyConversation}
-			data-tooltip-id='senweaver-tooltip'
-			data-tooltip-content='Copy'
-			data-tooltip-place='top'
-		>
-			{copied ? (
-				<Check size={14} className="text-green-500" />
-			) : (
-				<CopyIcon size={14} />
-			)}
+		{/* Feedback buttons - 左侧，用户反馈（强化学习数据收集） */}
+		<div className='flex items-center gap-2'>
+			<div
+				className={`
+					select-none cursor-pointer transition-colors
+					${feedback === 'good' ? 'text-green-500' : 'text-senweaver-fg-3 hover:text-green-500'}
+				`}
+				onClick={() => handleFeedback('good')}
+				data-tooltip-id='senweaver-tooltip'
+				data-tooltip-content={feedback === 'good' ? 'Remove good feedback' : 'Good response'}
+				data-tooltip-place='top'
+			>
+				<ThumbsUp size={14} fill={feedback === 'good' ? 'currentColor' : 'none'} />
+			</div>
+			<div
+				className={`
+					select-none cursor-pointer transition-colors
+					${feedback === 'bad' ? 'text-red-500' : 'text-senweaver-fg-3 hover:text-red-500'}
+				`}
+				onClick={() => handleFeedback('bad')}
+				data-tooltip-id='senweaver-tooltip'
+				data-tooltip-content={feedback === 'bad' ? 'Remove bad feedback' : 'Bad response'}
+				data-tooltip-place='top'
+			>
+				<ThumbsDown size={14} fill={feedback === 'bad' ? 'currentColor' : 'none'} />
+			</div>
 		</div>
 
-		{/* Rollback button */}
-		<div
-			className={`
-				text-senweaver-fg-3 select-none
-				${isDisabled ? 'cursor-default opacity-50' : 'cursor-pointer hover:text-senweaver-fg-1'}
-				transition-colors
-			`}
-			onClick={() => {
-				if (threadIsRunning) return
-				if (isDisabled) return
-				chatThreadService.jumpToCheckpointBeforeMessageIdx({
-					threadId,
-					messageIdx,
-					jumpToUserModified: messageIdx === (chatThreadService.state.allThreads[threadId]?.messages.length ?? 0) - 1
-				})
-			}}
-			data-tooltip-id='senweaver-tooltip'
-			data-tooltip-content={isDisabled ? `Disabled ${isRunning ? 'when running' : 'because another thread is running'}` : 'Checkpoint'}
-			data-tooltip-place='top'
-		>
-			<Undo2 size={14} className={isDisabled ? '' : 'text-green-500'} />
+		{/* Copy & Rollback buttons - 右侧 */}
+		<div className='flex items-center gap-2'>
+			{/* Copy conversation button */}
+			<div
+				className={`
+					text-senweaver-fg-3 select-none cursor-pointer
+					hover:text-senweaver-fg-1 transition-colors
+				`}
+				onClick={handleCopyConversation}
+				data-tooltip-id='senweaver-tooltip'
+				data-tooltip-content='Copy'
+				data-tooltip-place='top'
+			>
+				{copied ? (
+					<Check size={14} className="text-green-500" />
+				) : (
+					<CopyIcon size={14} />
+				)}
+			</div>
+
+			{/* Rollback button */}
+			<div
+				className={`
+					text-senweaver-fg-3 select-none
+					${isDisabled ? 'cursor-default opacity-50' : 'cursor-pointer hover:text-senweaver-fg-1'}
+					transition-colors
+				`}
+				onClick={() => {
+					if (threadIsRunning) return
+					if (isDisabled) return
+					chatThreadService.jumpToCheckpointBeforeMessageIdx({
+						threadId,
+						messageIdx,
+						jumpToUserModified: messageIdx === (chatThreadService.state.allThreads[threadId]?.messages.length ?? 0) - 1
+					})
+				}}
+				data-tooltip-id='senweaver-tooltip'
+				data-tooltip-content={isDisabled ? `Disabled ${isRunning ? 'when running' : 'because another thread is running'}` : 'Checkpoint'}
+				data-tooltip-place='top'
+			>
+				<Undo2 size={14} className={isDisabled ? '' : 'text-green-500'} />
+			</div>
 		</div>
 	</div>
 }

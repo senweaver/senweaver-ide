@@ -21,6 +21,7 @@ import { IMCPService } from '../common/mcpService.js';
 import { IFileService } from '../../../../platform/files/common/files.js';
 import { enhancedContextManager } from '../common/smartContextManager.js';
 import { getAgentComposition, getAgentDefinition } from '../common/agentService.js';
+import { IAPOService } from '../common/apoService.js';
 
 export const EMPTY_MESSAGE = '(empty message)'
 
@@ -42,37 +43,10 @@ type SimpleLLMMessage = {
 }
 
 
-
-// 更精确的 token 估算：3.5 chars/token（针对中英混合文本）
-// 之前用 4 会低估 token 使用量约 14%，导致发送时超限
+// More precise token estimation: 3.5 chars/token (for mixed Chinese/English text)
+// Previously using 4 would underestimate token usage by ~14%, causing context overflow
 const CHARS_PER_TOKEN = 3.5
-const TRIM_TO_LEN = 500 // 裁剪后保留的长度
-
-
-
-
-// convert messages as if about to send to openai
-/*
-reference - https://platform.openai.com/docs/guides/function-calling#function-calling-steps
-openai MESSAGE (role=assistant):
-"tool_calls":[{
-	"type": "function",
-	"id": "call_12345xyz",
-	"function": {
-	"name": "get_weather",
-	"arguments": "{\"latitude\":48.8566,\"longitude\":2.3522}"
-}]
-
-openai RESPONSE (role=user):
-{   "role": "tool",
-	"tool_call_id": tool_call.id,
-	"content": str(result)    }
-
-also see
-openai on prompting - https://platform.openai.com/docs/guides/reasoning#advice-on-prompting
-openai on developer system message - https://cdn.openai.com/spec/model-spec-2024-05-08.html#follow-the-chain-of-command
-*/
-
+const TRIM_TO_LEN = 500 // Length to keep after trimming
 
 const prepareMessages_openai_tools = (messages: SimpleLLMMessage[]): AnthropicOrOpenAILLMMessage[] => {
 
@@ -266,16 +240,16 @@ const prepareOpenAIOrAnthropicMessages = ({
 	reservedOutputTokenSpace: number | null | undefined,
 }): { messages: AnthropicOrOpenAILLMMessage[], separateSystemMessage: string | undefined } => {
 
-	// 智能计算输出 token 保留空间：
-	// - 对于大模型（>100k tokens），保留 20-25% 用于输出
-	// - 对于小模型，至少保留 4k-8k tokens
-	// - 最多保留 16k tokens（避免过度占用输入空间）
+	// Smart output token reservation:
+	// - For large models (>100k tokens), reserve 20-25% for output
+	// - For small models, reserve at least 4k-8k tokens
+	// - Max 16k tokens reserved (avoid over-consuming input space)
 	reservedOutputTokenSpace = Math.max(
 		Math.min(
-			contextWindow * 0.20, // 保留 20% 的上下文用于输出（而不是之前的 50%！）
-			16_000 // 最多保留 16k tokens
+			contextWindow * 0.20, // Reserve 20% of context for output (not 50% as before!)
+			16_000 // Max 16k tokens reserved
 		),
-		reservedOutputTokenSpace ?? 4_096 // 默认至少 4096
+		reservedOutputTokenSpace ?? 4_096 // Default minimum 4096
 	)
 	let messages: (SimpleLLMMessage | { role: 'system', content: string })[] = deepClone(messages_)
 
@@ -285,7 +259,20 @@ const prepareOpenAIOrAnthropicMessages = ({
 	const sysMsgParts: string[] = []
 	if (aiInstructions) sysMsgParts.push(`GUIDELINES (from the user's .SenweaverRules file):\n${aiInstructions}`)
 	if (systemMessage) sysMsgParts.push(systemMessage)
-	const combinedSystemMessage = sysMsgParts.join('\n\n')
+	let combinedSystemMessage = sysMsgParts.join('\n\n')
+
+	// ================ System message budget control ================
+	// Prevent system message (including APO/RL rules) from consuming too much context
+	// Budget: max 30% of available input chars, with a hard cap
+	const availableInputCharsForBudget = (contextWindow - (reservedOutputTokenSpace ?? 4096)) * CHARS_PER_TOKEN
+	const SYSTEM_MSG_MAX_RATIO = 0.30 // System message can use at most 30% of input space
+	const SYSTEM_MSG_HARD_CAP = 60_000 // Hard cap: ~17k tokens
+	const systemMsgBudget = Math.min(availableInputCharsForBudget * SYSTEM_MSG_MAX_RATIO, SYSTEM_MSG_HARD_CAP)
+
+	if (combinedSystemMessage.length > systemMsgBudget) {
+		// Truncate system message, preserving the beginning (core instructions) over the end (APO rules etc.)
+		combinedSystemMessage = combinedSystemMessage.substring(0, Math.floor(systemMsgBudget) - 40) + '\n...[system prompt truncated for context budget]...'
+	}
 
 	messages.unshift({ role: 'system', content: combinedSystemMessage })
 
@@ -294,13 +281,29 @@ const prepareOpenAIOrAnthropicMessages = ({
 
 	type MesType = (typeof messages)[0]
 
-	// ================ 第一阶段：激进的消息删除（如果消息数量过多） ================
-	const MAX_MESSAGES_BEFORE_AGGRESSIVE_PRUNE = 50 // 如果超过 50 条消息，先进行激进删除
+	// ================ Locate the LAST user message (current input) — MUST be protected at all costs ================
+	let lastUserMsgIdx = -1;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i].role === 'user') {
+			lastUserMsgIdx = i;
+			break;
+		}
+	}
+
+	// ================ Phase 1: Aggressive message deletion (if too many messages) ================
+	const MAX_MESSAGES_BEFORE_AGGRESSIVE_PRUNE = 50
 	if (messages.length > MAX_MESSAGES_BEFORE_AGGRESSIVE_PRUNE) {
-		// 保留：前 2 条（system + first user）+ 最后 15 条
-		const keepStart = messages.slice(0, 2)
-		const keepEnd = messages.slice(-15)
-		messages = [...keepStart, ...keepEnd]
+		// Keep: system (idx 0) + last user message + last 15 messages
+		const keepSet = new Set<number>();
+		for (let i = 0; i < Math.min(2, messages.length); i++) keepSet.add(i);
+		if (lastUserMsgIdx >= 0) keepSet.add(lastUserMsgIdx);
+		for (let i = Math.max(0, messages.length - 15); i < messages.length; i++) keepSet.add(i);
+		messages = messages.filter((_, i) => keepSet.has(i));
+		// Recalculate lastUserMsgIdx after filtering
+		lastUserMsgIdx = -1;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			if (messages[i].role === 'user') { lastUserMsgIdx = i; break; }
+		}
 	}
 
 	// ================ fit into context ================
@@ -308,18 +311,21 @@ const prepareOpenAIOrAnthropicMessages = ({
 	// the higher the weight, the higher the desire to truncate - TRIM HIGHEST WEIGHT MESSAGES
 	const alreadyTrimmedIdxes = new Set<number>()
 	const weight = (message: MesType, messages: MesType[], idx: number) => {
+		// CRITICAL: The last user message (current input) has weight 0 — NEVER trim it
+		if (idx === lastUserMsgIdx) return 0
+
 		const base = message.content.length
 
 		let multiplier: number
 		multiplier = 1 + (messages.length - 1 - idx) / messages.length // slow rampdown from 2 to 1 as index increases
 		if (message.role === 'user') {
-			multiplier *= 1
+			multiplier *= 0.5 // user messages are more valuable, lower trim priority
 		}
 		else if (message.role === 'system') {
 			multiplier *= .01 // very low weight
 		}
 		else {
-			multiplier *= 10 // llm tokens are far less valuable than user tokens
+			multiplier *= 10 // assistant/tool tokens are far less valuable than user tokens
 		}
 
 		// any already modified message should not be trimmed again
@@ -347,43 +353,57 @@ const prepareOpenAIOrAnthropicMessages = ({
 		return largestIndex
 	}
 
-	// ================ 第二阶段：精细修剪（字符级） ================
+	// ================ Phase 2: Fine-grained trimming (character-level) ================
 	let totalLen = 0
 	for (const m of messages) { totalLen += m.content.length }
 	const availableInputTokens = contextWindow - reservedOutputTokenSpace
 	const availableInputChars = availableInputTokens * CHARS_PER_TOKEN
 	const charsNeedToTrim = totalLen - Math.max(
 		availableInputChars,
-		20_000 // 确保至少保留 20k 字符（约 5k tokens）的对话历史
+		20_000 // Ensure at least 20k chars (~5k tokens) of conversation history are kept
 	)
 
-	// 如果还需要修剪
+	// If trimming is still needed
 	if (charsNeedToTrim > 0) {
 		let remainingCharsToTrim = charsNeedToTrim
 		let i = 0
-		const MAX_TRIM_ITERATIONS = 100 // 进一步降低迭代次数
+		const MAX_TRIM_ITERATIONS = 100
 
 		while (remainingCharsToTrim > 0 && i < MAX_TRIM_ITERATIONS) {
 			i += 1
 
 			const trimIdx = _findLargestByWeight(messages)
 
-			// 安全检查：如果找不到可修剪的消息，强制退出
+			// Safety check: if no trimmable message found, force exit
 			if (trimIdx === -1 || !messages[trimIdx]) {
 				break
 			}
 
+			// CRITICAL: Never trim the last user message
+			if (trimIdx === lastUserMsgIdx) {
+				alreadyTrimmedIdxes.add(trimIdx)
+				continue
+			}
+
 			const m = messages[trimIdx]
 
-			// 安全检查：如果消息太短，跳过
+			// Safety check: if message is too short, skip
 			if (m.content.length <= TRIM_TO_LEN) {
 				alreadyTrimmedIdxes.add(trimIdx)
-				// 如果所有消息都已经很短了，还是超出上下文，那就强制删除一些
+				// If all messages are already short but still exceed context, force delete some
 				if (alreadyTrimmedIdxes.size >= messages.length - 3) {
 					if (messages.length > 10) {
-						const keepStart = messages.slice(0, 2)
-						const keepEnd = messages.slice(-5)
-						messages = [...keepStart, ...keepEnd]
+						// Keep system + last user message + last 3 messages
+						const keepIdxs = new Set<number>();
+						for (let j = 0; j < Math.min(2, messages.length); j++) keepIdxs.add(j);
+						if (lastUserMsgIdx >= 0) keepIdxs.add(lastUserMsgIdx);
+						for (let j = Math.max(0, messages.length - 3); j < messages.length; j++) keepIdxs.add(j);
+						messages = messages.filter((_, j) => keepIdxs.has(j));
+						// Recalculate lastUserMsgIdx
+						lastUserMsgIdx = -1;
+						for (let j = messages.length - 1; j >= 0; j--) {
+							if (messages[j].role === 'user') { lastUserMsgIdx = j; break; }
+						}
 					}
 					break
 				}
@@ -393,7 +413,6 @@ const prepareOpenAIOrAnthropicMessages = ({
 			// if can finish here, do
 			const numCharsWillTrim = m.content.length - TRIM_TO_LEN
 			if (numCharsWillTrim > remainingCharsToTrim) {
-				// trim remainingCharsToTrim + '...'.length chars
 				m.content = m.content.slice(0, m.content.length - remainingCharsToTrim - '...'.length).trim() + '...'
 				break
 			}
@@ -404,35 +423,67 @@ const prepareOpenAIOrAnthropicMessages = ({
 		}
 	}
 
-	// ================ 第三阶段：最终安全检查 ================
-	// 再次检查总大小，如果第二阶段裁剪后仍然过大，进行紧急裁剪
+	// ================ Phase 3: Final safety check ================
 	let finalTotalLen = 0
 	for (const m of messages) { finalTotalLen += m.content.length }
 
-	const SAFETY_MARGIN = 0.9 // 留 10% 安全余量
+	const SAFETY_MARGIN = 0.85 // Leave 15% safety margin (more conservative)
 	const safeInputChars = availableInputChars * SAFETY_MARGIN
 
 	if (finalTotalLen > safeInputChars) {
-		// 紧急裁剪：按比例缩减所有非 system/最近消息
+		// Emergency trimming: proportionally reduce all non-system/non-lastUser messages
 		const excessRatio = safeInputChars / finalTotalLen
-		const EMERGENCY_KEEP_CHARS = 200 // 紧急模式下每条消息最少保留的字符数
+		const EMERGENCY_KEEP_CHARS = 200
 
-		for (let idx = 1; idx < messages.length - 2; idx++) {
+		for (let idx = 1; idx < messages.length; idx++) {
 			const m = messages[idx]
 			if (m.role === 'system') continue
+			// CRITICAL: Never truncate the last user message
+			if (idx === lastUserMsgIdx) continue
 			const targetLen = Math.max(EMERGENCY_KEEP_CHARS, Math.floor(m.content.length * excessRatio))
 			if (m.content.length > targetLen) {
 				m.content = m.content.substring(0, targetLen - 30) + '\n...[emergency truncation]...'
 			}
 		}
 
-		// 如果还是太大，只保留 system + 最近 5 条消息
+		// If still too large, keep only system + last user message + last 3 messages
 		let recheckLen = 0
 		for (const m of messages) { recheckLen += m.content.length }
-		if (recheckLen > safeInputChars && messages.length > 6) {
-			const keepStart = messages.slice(0, 1) // system
-			const keepEnd = messages.slice(-5)      // 最近 5 条
-			messages = [...keepStart, ...keepEnd]
+		if (recheckLen > safeInputChars && messages.length > 4) {
+			const keepIdxs = new Set<number>();
+			keepIdxs.add(0); // system
+			if (lastUserMsgIdx >= 0) keepIdxs.add(lastUserMsgIdx);
+			for (let j = Math.max(0, messages.length - 3); j < messages.length; j++) keepIdxs.add(j);
+			messages = messages.filter((_, j) => keepIdxs.has(j));
+			lastUserMsgIdx = -1;
+			for (let j = messages.length - 1; j >= 0; j--) {
+				if (messages[j].role === 'user') { lastUserMsgIdx = j; break; }
+			}
+		}
+	}
+
+	// ================ Phase 4: Ultimate fallback — guarantee no context overflow ================
+	// If STILL too large after all phases, keep only system message + last user message
+	// This ensures the assistant ALWAYS responds to the user's current question
+	{
+		let ultimateLen = 0
+		for (const m of messages) { ultimateLen += m.content.length }
+		if (ultimateLen > availableInputChars) {
+			console.warn('[prepareMessages] Phase 4 ultimate fallback: keeping only system + last user message')
+			const sysMsg = messages.find(m => m.role === 'system')
+			const lastUserMsg = lastUserMsgIdx >= 0 ? messages[lastUserMsgIdx] : messages[messages.length - 1]
+			messages = []
+			if (sysMsg) {
+				// Trim system message if needed to make room for user message
+				const userMsgLen = lastUserMsg.content.length
+				const maxSysMsgLen = Math.max(2000, availableInputChars - userMsgLen - 1000)
+				if (sysMsg.content.length > maxSysMsgLen) {
+					sysMsg.content = sysMsg.content.substring(0, maxSysMsgLen - 30) + '\n...[system message truncated]...'
+				}
+				messages.push(sysMsg)
+			}
+			messages.push(lastUserMsg)
+			lastUserMsgIdx = messages.length - 1
 		}
 	}
 
@@ -606,11 +657,11 @@ export const IConvertToLLMMessageService = createDecorator<IConvertToLLMMessageS
 class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMessageService {
 	_serviceBrand: undefined;
 
-	// 优化：缓存系统消息，避免重复生成
+	// Optimization: cache system message to avoid repeated generation
 	private _cachedSystemMessage: string | null = null;
 	private _cachedSystemMessageKey: string = '';
 	private _cachedSystemMessageTimestamp: number = 0;
-	private readonly SYSTEM_MESSAGE_CACHE_TTL = 300000; // 300秒（5分钟）缓存，大幅提高命中率
+	private readonly SYSTEM_MESSAGE_CACHE_TTL = 300000; // 300s (5 min) cache, greatly improves hit rate
 
 	constructor(
 		@IModelService private readonly modelService: IModelService,
@@ -622,30 +673,31 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		@ISenweaverModelService private readonly senweaverModelService: ISenweaverModelService,
 		@IMCPService private readonly mcpService: IMCPService,
 		@IFileService private readonly fileService: IFileService,
+		@IAPOService private readonly apoService: IAPOService,
 	) {
 		super()
-		// 优化：监听文件变化，但只在真正影响系统消息时才清除缓存
-		// 只监听文件夹的创建/删除和工作区变化，不监听文件内容变化
-		// 使用防抖，避免频繁清除缓存
+		// Optimization: listen for file changes, but only clear cache when it truly affects system message
+		// Only listen for folder creation/deletion and workspace changes, not file content changes
+		// Use debounce to avoid frequent cache clearing
 		let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 		this._register(this.fileService.onDidFilesChange((e) => {
-			// 检查是否有文件的创建/删除（不包括文件内容更新）
-			// 文件编辑（UPDATED）不应该影响系统消息缓存，所以我们可以忽略 UPDATED
+			// Check for file creation/deletion (not including file content updates)
+			// File edits (UPDATED) should not affect system message cache, so we can ignore UPDATED
 			const hasDirectoryChange = e.rawAdded.length > 0 || e.rawDeleted.length > 0
 
-			// 如果没有目录结构变化（只有文件内容更新），不清除缓存
+			// If no directory structure change (only file content updates), don't clear cache
 			if (!hasDirectoryChange) {
 				return
 			}
 
-			// 防抖：2秒内多次变化只清除一次缓存（目录结构变化不频繁）
+			// Debounce: multiple changes within 2s only clear cache once (directory structure changes are infrequent)
 			if (debounceTimer) {
 				clearTimeout(debounceTimer);
 			}
 			debounceTimer = setTimeout(() => {
 				this._cachedSystemMessage = null;
 				debounceTimer = null;
-			}, 2000); // 增加到2秒防抖，因为目录结构变化不频繁
+			}, 2000); // Increased to 2s debounce since directory structure changes are infrequent
 		}))
 	}
 
@@ -681,15 +733,15 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 	// system message
 	private _generateChatMessagesSystemMessage = async (chatMode: ChatMode, specialToolFormat: 'openai-style' | 'anthropic-style' | 'gemini-style' | undefined) => {
-		// 优化：生成缓存键，基于可能影响系统消息的所有因素
+		// Optimization: generate cache key based on all factors that may affect system message
 		const workspaceFolders = this.workspaceContextService.getWorkspace().folders.map(f => f.uri.fsPath)
 		const openedURIs = this.modelService.getModels().filter(m => m.isAttachedToEditor()).map(m => m.uri.fsPath) || [];
 		const activeURI = this.editorService.activeEditor?.resource?.fsPath;
 		const mcpTools = this.mcpService.getMCPTools()
 		const persistentTerminalIDs = this.terminalToolService.listPersistentTerminalIds()
 
-		// 优化：简化缓存键，只包含真正影响系统消息的因素
-		// 移除 openedURIs 和 activeURI，因为它们变化频繁但影响不大
+		// Optimization: simplify cache key, only include factors that truly affect system message
+		// Remove openedURIs and activeURI since they change frequently but have minimal impact
 		const cacheKey = JSON.stringify({
 			workspaceFolders,
 			chatMode,
@@ -700,15 +752,15 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 		const now = Date.now()
 
-		// 检查缓存是否有效
+		// Check if cache is valid
 		if (this._cachedSystemMessage !== null &&
 			this._cachedSystemMessageKey === cacheKey &&
 			(now - this._cachedSystemMessageTimestamp) < this.SYSTEM_MESSAGE_CACHE_TTL) {
 			return this._cachedSystemMessage
 		}
 
-		// 添加超时保护，避免 getAllDirectoriesStr 卡住
-		const DIRECTORY_STR_TIMEOUT = 10000 // 10秒超时
+		// Add timeout protection to prevent getAllDirectoriesStr from hanging
+		const DIRECTORY_STR_TIMEOUT = 10000 // 10 second timeout
 		let directoryStr: string
 		try {
 			directoryStr = await Promise.race([
@@ -723,7 +775,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			])
 		} catch (error) {
 			console.error('[ConvertToLLMMessageService] getAllDirectoriesStr failed or timed out:', error)
-			// 如果超时或失败，使用一个简单的目录字符串
+			// If timeout or failure, use a simple directory string
 			directoryStr = workspaceFolders.length > 0
 				? `Workspace: ${workspaceFolders.join(', ')}\n(Directory listing unavailable - use list_dir tool if needed)`
 				: '(NO WORKSPACE OPEN)'
@@ -733,25 +785,25 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 		const baseSystemMessage = chat_systemMessage({ workspaceFolders, openedURIs, directoryStr, activeURI, persistentTerminalIDs, chatMode, mcpTools, includeXMLToolDefinitions })
 
-		// Multi-Agent 系统：根据 chatMode 获取对应的主 Agent，并添加其系统提示词
+		// Multi-Agent system: get the primary Agent for the chatMode and add its system prompt
 		const agentComposition = getAgentComposition(chatMode)
 		const primaryAgent = getAgentDefinition(agentComposition.primaryAgent)
 
 		let systemMessage = baseSystemMessage
 
 		if (primaryAgent) {
-			// 构建 Agent 增强提示词
+			// Build Agent-enhanced prompt
 			const agentParts: string[] = []
 
-			// Agent 角色说明
-			agentParts.push(`\n## Agent 角色\n你当前作为 **${primaryAgent.name}** 运行。${primaryAgent.description}`)
+			// Agent role description
+			agentParts.push(`\n## Agent Role\nYou are currently running as **${primaryAgent.name}**. ${primaryAgent.description}`)
 
-			// Agent 专属系统提示词
+			// Agent-specific system prompt
 			if (primaryAgent.systemPrompt) {
-				agentParts.push(`\n## Agent 专属指令\n${primaryAgent.systemPrompt}`)
+				agentParts.push(`\n## Agent-Specific Instructions\n${primaryAgent.systemPrompt}`)
 			}
 
-			// 可用子代理说明（如果有）
+			// Available sub-agents description (if any)
 			if (agentComposition.availableSubAgents.length > 0 && agentComposition.autoSelectSubAgents) {
 				const subAgentDescriptions = agentComposition.availableSubAgents
 					.map((id: string) => {
@@ -762,22 +814,45 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 					.join('\n')
 
 				if (subAgentDescriptions) {
-					agentParts.push(`\n## 可调用的专业子代理\n对于复杂任务，你可以将子任务分解给以下专业代理并行执行：\n${subAgentDescriptions}\n\n提示：对于涉及多个文件或需要探索代码库的复杂任务，考虑先使用探索代理了解项目结构，再进行编码。`)
+					agentParts.push(`\n## Available Specialized Sub-Agents\nFor complex tasks, you can decompose sub-tasks to the following specialized agents for parallel execution:\n${subAgentDescriptions}\n\nTip: For complex tasks involving multiple files or requiring codebase exploration, consider using the exploration agent to understand project structure first, then proceed with coding.`)
 				}
 			}
 
-			// 并行执行说明
+			// Parallel execution description
 			if (agentComposition.enableParallel) {
-				agentParts.push(`\n## 并行执行能力\n你支持最多 ${agentComposition.maxParallel} 个子任务并行执行。对于可以独立完成的子任务，优先考虑并行处理以提高效率。`)
+				agentParts.push(`\n## Parallel Execution Capability\nYou support up to ${agentComposition.maxParallel} sub-tasks running in parallel. For sub-tasks that can be completed independently, prefer parallel processing to improve efficiency.`)
 			}
 
-			// 合并到系统消息
+			// Merge into system message
 			if (agentParts.length > 0) {
-				systemMessage = baseSystemMessage + '\n\n# Multi-Agent 系统' + agentParts.join('')
+				systemMessage = baseSystemMessage + '\n\n# Multi-Agent System' + agentParts.join('')
 			}
 		}
 
-		// 更新缓存
+		// [APO] Inject optimized prompt rules with budget control
+		// Budget prevents RL-optimized rules from bloating system message and causing context overflow
+		try {
+			const APO_RULES_MAX_CHARS = 2000; // ~570 tokens max for APO rules
+			const apoRules = this.apoService.getOptimizedRules();
+			if (apoRules.length > 0) {
+				let apoContent = '';
+				let rulesIncluded = 0;
+				for (const rule of apoRules) {
+					const candidate = apoContent + (apoContent ? '\n' : '') + rule;
+					if (candidate.length > APO_RULES_MAX_CHARS) break;
+					apoContent = candidate;
+					rulesIncluded++;
+				}
+				if (apoContent) {
+					const truncNote = rulesIncluded < apoRules.length ? ` (${rulesIncluded}/${apoRules.length} rules, budget limited)` : '';
+					systemMessage += `\n\n# APO Optimized Rules${truncNote}\n` + apoContent;
+				}
+			}
+		} catch {
+			// APO service exception does not affect normal functionality
+		}
+
+		// Update cache
 		this._cachedSystemMessage = systemMessage
 		this._cachedSystemMessageKey = cacheKey
 		this._cachedSystemMessageTimestamp = now
@@ -791,33 +866,33 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 	// --- LLM Chat messages ---
 
 	/**
-	 * 清理可能触发 WAF 的敏感内容
-	 * WAF 会检测 XSS 攻击模式
+	 * Sanitize content that may trigger WAF
+	 * WAF detects XSS attack patterns
 	 */
 	private _sanitizeForWAF(content: string): string {
 		let sanitized = content;
-		// 移除 script 标签
+		// Remove script tags
 		sanitized = sanitized.replace(/<script[\s\S]*?<\/script>/gi, '');
 		sanitized = sanitized.replace(/<script[^>]*>/gi, '');
-		// 移除事件处理器
+		// Remove event handlers
 		sanitized = sanitized.replace(/\s(on\w+)\s*=\s*["'][^"']*["']/gi, '');
-		// 移除 javascript: URL
+		// Remove javascript: URLs
 		sanitized = sanitized.replace(/javascript\s*:/gi, '');
-		// 移除 iframe
+		// Remove iframes
 		sanitized = sanitized.replace(/<iframe[\s\S]*?<\/iframe>/gi, '');
 		sanitized = sanitized.replace(/<iframe[^>]*>/gi, '');
 		return sanitized;
 	}
 
 	/**
-	 * 压缩 Designer 模式历史消息，只保留进度信息
+	 * Compress Designer mode history messages, only keep progress info
 	 */
 	private _compressDesignerHistory(content: string, keepCss: boolean): string {
-		// 提取设计规划
+		// Extract design plan
 		const planMatch = content.match(/\[DESIGN_PLAN:START\][\s\S]*?\[DESIGN_PLAN:END\]/);
 		const plan = planMatch ? planMatch[0] : '';
 
-		// 提取进度标记
+		// Extract progress markers
 		const markers: string[] = [];
 		const progress = content.match(/\[DESIGN_PROGRESS:\d+\/\d+\]/g);
 		const incomplete = content.match(/\[DESIGN_INCOMPLETE:\d+\/\d+\]/g);
@@ -827,45 +902,45 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		if (complete) markers.push(...complete);
 
 		if (keepCss) {
-			// 移除 HTML，保留 CSS
-			let result = content.replace(/```html\s*\n[\s\S]*?```/gi, '[HTML已保存]');
+			// Remove HTML, keep CSS
+			let result = content.replace(/```html\s*\n[\s\S]*?```/gi, '[HTML saved]');
 			result = result.replace(/```\n([\s\S]*?)```/gi, (match, code) => {
 				if (code.includes('<!DOCTYPE') || code.includes('<html')) {
-					return '[HTML已保存]';
+					return '[HTML saved]';
 				}
 				return this._sanitizeForWAF(match);
 			});
 			return this._sanitizeForWAF(result);
 		}
 
-		// 完全移除代码，只保留进度
+		// Completely remove code, only keep progress
 		const parts: string[] = [];
 		if (plan) parts.push(plan);
 		if (markers.length > 0) parts.push(markers.join(' '));
 
 		if (parts.length > 0) return parts.join('\n');
-		return '[UI已完成]';
+		return '[UI completed]';
 	}
 
 	/**
-	 * 智能压缩历史消息
-	 * 保留最近的消息，压缩较旧的消息
+	 * Smart history message compression
+	 * Keep recent messages, compress older messages
 	 */
 	/**
-	 * 智能历史消息压缩
+	 * Smart history message compression
 	 *
-	 * 核心思路：压缩不是简单的截断，而是提取有用的语义摘要
-	 * - read_file → 保留文件路径 + 行数 + 导出/函数/类的名称列表
-	 * - edit_file / rewrite_file → 保留操作描述
-	 * - search → 保留搜索结果文件列表
-	 * - 其他 → 保留开头 + 结尾
+	 * Core idea: compression is not simple truncation, but extracting useful semantic summaries
+	 * - read_file → keep file path + line count + export/function/class name list
+	 * - edit_file / rewrite_file → keep operation description
+	 * - search → keep search result file list
+	 * - other → keep head + tail
 	 */
 	private _compressHistoryMessage(content: string, role: 'assistant' | 'tool' | 'user', toolName?: string): string {
-		const MAX_COMPRESSED_LENGTH = 500 // 保留更多上下文（500 chars vs 300）
+		const MAX_COMPRESSED_LENGTH = 500 // Keep more context (500 chars vs 300)
 
 		if (role === 'user') {
 			if (content.length <= MAX_COMPRESSED_LENGTH) return content
-			// 用户消息：保留头尾，因为用户的指令通常在头部，选择的文件名在尾部
+			// User messages: keep head and tail, as user instructions are usually at the head, selected filenames at the tail
 			const headLen = Math.floor(MAX_COMPRESSED_LENGTH * 0.6)
 			const tailLen = Math.floor(MAX_COMPRESSED_LENGTH * 0.3)
 			return content.slice(0, headLen) + '\n...[message truncated]...\n' + content.slice(-tailLen)
@@ -874,12 +949,12 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		if (role === 'tool') {
 			if (content.length <= MAX_COMPRESSED_LENGTH) return content
 
-			// read_file: 语义摘要 — 保留文件路径 + 行数 + 提取关键标识符
+			// read_file: semantic summary — keep file path + line count + extract key identifiers
 			if (toolName === 'read_file') {
 				const lines = content.split('\n')
-				const filePath = lines[0] || '' // 第一行通常是文件路径
+				const filePath = lines[0] || '' // First line is usually the file path
 
-				// 提取关键代码标识符（export, function, class, interface, const/let 导出）
+				// Extract key code identifiers (export, function, class, interface, const/let exports)
 				const keyIdentifiers: string[] = []
 				for (const line of lines) {
 					// export declarations
@@ -892,7 +967,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 					const reactMatch = line.match(/^(?:export\s+)?(?:const|function)\s+(\w+)\s*[=:]\s*(?:\(|React)/);
 					if (reactMatch) { keyIdentifiers.push(reactMatch[1]); continue }
 
-					if (keyIdentifiers.length >= 20) break // 最多提取 20 个标识符
+					if (keyIdentifiers.length >= 20) break // Extract at most 20 identifiers
 				}
 
 				const identifierStr = keyIdentifiers.length > 0
@@ -901,7 +976,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 				return `[Previously read] ${filePath} (${lines.length} lines)${identifierStr}\n(Use read_file to re-read if needed)`
 			}
 
-			// search_for_files / search_pathnames_only: 保留文件列表
+			// search_for_files / search_pathnames_only: keep file list
 			if (toolName === 'search_for_files' || toolName === 'search_pathnames_only') {
 				const lines = content.split('\n').filter(l => l.trim())
 				if (lines.length > 10) {
@@ -910,7 +985,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 				return content
 			}
 
-			// ls_dir / get_dir_tree: 保留目录结构的前几行
+			// ls_dir / get_dir_tree: keep first few lines of directory structure
 			if (toolName === 'ls_dir' || toolName === 'get_dir_tree') {
 				const lines = content.split('\n')
 				if (lines.length > 15) {
@@ -919,12 +994,12 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 				return content
 			}
 
-			// edit_file / rewrite_file: 这些结果通常很短，保留完整
+			// edit_file / rewrite_file: these results are usually short, keep complete
 			if (toolName === 'edit_file' || toolName === 'rewrite_file' || toolName === 'create_file_or_folder') {
 				return content.slice(0, MAX_COMPRESSED_LENGTH)
 			}
 
-			// run_command: 保留头尾（命令输出首尾通常最有用）
+			// run_command: keep head and tail (command output head/tail are usually most useful)
 			if (toolName === 'run_command') {
 				const lines = content.split('\n')
 				if (lines.length > 20) {
@@ -932,16 +1007,16 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 				}
 			}
 
-			// 默认压缩：保留开头
+			// Default compression: keep beginning
 			return content.slice(0, MAX_COMPRESSED_LENGTH) + '\n...[result truncated]...'
 		}
 
 		if (role === 'assistant') {
 			if (content.length <= MAX_COMPRESSED_LENGTH) return content
 
-			// Assistant 消息：保留开头部分作为摘要
+			// Assistant messages: keep beginning as summary
 			let summary = content.slice(0, MAX_COMPRESSED_LENGTH)
-			// 尝试在句子或段落边界截断
+			// Try to truncate at sentence or paragraph boundary
 			const lastPeriod = summary.lastIndexOf('。')
 			const lastNewline = summary.lastIndexOf('\n')
 			const cutAt = Math.max(lastPeriod, lastNewline)
@@ -959,18 +1034,31 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		const isDesigner = chatMode === 'designer';
 		const total = chatMessages.length;
 
-		// ========== 智能压缩配置 ==========
-		// 保留最近的 N 条完整消息，压缩更早的消息
-		const KEEP_RECENT_COUNT = 10 // 保留最近 10 条完整消息
-		const shouldCompress = (index: number) => {
-			// 总是保留最近的消息
+		// ========== Smart compression config ==========
+		// Keep the most recent N messages complete, compress older messages
+		const KEEP_RECENT_COUNT = 10
+
+		// CRITICAL: Find the LAST user message index — this is the user's current input
+		// and must NEVER be compressed or truncated under any circumstances
+		let lastUserMsgIdx = -1;
+		for (let i = total - 1; i >= 0; i--) {
+			if (chatMessages[i].role === 'user') {
+				lastUserMsgIdx = i;
+				break;
+			}
+		}
+
+		const shouldCompress = (index: number, role: string) => {
+			// RULE 1: The last user message (current input) is NEVER compressed
+			if (role === 'user' && index === lastUserMsgIdx) return false
+			// RULE 2: Always keep the most recent messages uncompressed
 			if (index >= total - KEEP_RECENT_COUNT) return false
-			// 如果消息总数很少，不压缩
+			// RULE 3: If total message count is small, don't compress
 			if (total <= KEEP_RECENT_COUNT * 1.5) return false
 			return true
 		}
 
-		// 找最后一条 assistant 消息（用于 Designer 模式）
+		// Find last assistant message (for Designer mode)
 		let lastAsstIdx = -1;
 		if (isDesigner) {
 			for (let i = total - 1; i >= 0; i--) {
@@ -989,13 +1077,13 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			if (m.role === 'assistant') {
 				let content = m.displayContent;
 
-				// Designer 模式特殊处理
+				// Designer mode special handling
 				if (isDesigner) {
 					const isRecent = i >= total - 2 || i === lastAsstIdx;
 					content = this._compressDesignerHistory(content, isRecent);
 				}
-				// 普通模式：如果不是最近的消息，进行压缩
-				else if (shouldCompress(i)) {
+				// Normal mode: if not a recent message, compress
+				else if (shouldCompress(i, 'assistant')) {
 					content = this._compressHistoryMessage(content, 'assistant');
 				}
 
@@ -1008,12 +1096,12 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			else if (m.role === 'tool') {
 				let content = m.content;
 
-				// 智能上下文管理: 检查工具输出是否已被裁剪（传入原始内容用于生成语义摘要）
+				// Smart context management: check if tool output has been pruned (pass original content for semantic summary generation)
 				if (enhancedContextManager.isToolPruned(m.id)) {
 					content = enhancedContextManager.getPrunedToolContent(m.name, m.content);
 				}
-				// 如果不是最近的工具调用，进行压缩
-				else if (shouldCompress(i)) {
+				// If not a recent tool call, compress
+				else if (shouldCompress(i, 'tool')) {
 					content = this._compressHistoryMessage(content, 'tool', m.name);
 				}
 
@@ -1028,14 +1116,15 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 			else if (m.role === 'user') {
 				let content = m.content;
 
-				// 用户消息相对重要，但也可以适度压缩
-				if (shouldCompress(i)) {
+				// The LAST user message (current input) is NEVER compressed — highest priority
+				// Historical user messages can be moderately compressed
+				if (shouldCompress(i, 'user')) {
 					content = this._compressHistoryMessage(content, 'user');
 				}
 
 				simpleLLMMessages.push({
 					role: m.role,
-					content: m.content, // 实际上用户消息通常不长，保持原样
+					content: content,
 				})
 			}
 		}
@@ -1078,8 +1167,8 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 	prepareLLMChatMessages: IConvertToLLMMessageService['prepareLLMChatMessages'] = async ({ chatMessages, chatMode, modelSelection }) => {
 		if (modelSelection === null) return { messages: [], separateSystemMessage: undefined }
 
-		// 添加整体超时保护，防止消息准备卡住
-		const TOTAL_TIMEOUT = 30000 // 30秒总超时
+		// Add overall timeout protection to prevent message preparation from hanging
+		const TOTAL_TIMEOUT = 30000 // 30 second total timeout
 		const timeoutPromise = new Promise<never>((_, reject) =>
 			setTimeout(() => reject(new Error('prepareLLMChatMessages total timeout')), TOTAL_TIMEOUT)
 		)
@@ -1108,7 +1197,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 					const isReasoningEnabled = getIsReasoningEnabledState('Chat', providerName, modelName, modelSelectionOptions, overridesOfModel)
 					const reservedOutputTokenSpace = getReservedOutputTokenSpace(providerName, modelName, { isReasoningEnabled, overridesOfModel })
 
-					// 智能会话压缩：在消息转换前检查是否需要裁剪历史工具输出
+					// Smart conversation compression: check if historical tool outputs need pruning before message conversion
 					const usageInfo = enhancedContextManager.checkNeedsCompaction(
 						chatMessages
 							.filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'tool')
@@ -1125,7 +1214,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 
 					if (usageInfo.needsCompaction) {
 
-						// 执行工具输出裁剪
+						// Execute tool output pruning
 						enhancedContextManager.pruneToolOutputs(
 							chatMessages
 								.filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'tool')
@@ -1162,7 +1251,7 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 		} catch (error) {
 			if (error instanceof Error && error.message.includes('timeout')) {
 				console.error('[ConvertToLLMMessageService] prepareLLMChatMessages timed out. Returning minimal messages.')
-				// 返回一个最小的有效响应，而不是让整个系统卡死
+				// Return a minimal valid response instead of letting the entire system hang
 				return {
 					messages: [{
 						role: 'user' as const,
@@ -1179,10 +1268,10 @@ class ConvertToLLMMessageService extends Disposable implements IConvertToLLMMess
 	// --- FIM ---
 
 	prepareFIMMessage: IConvertToLLMMessageService['prepareFIMMessage'] = ({ messages }) => {
-		// FIM 请求不添加指令前缀，因为：
-		// 1. FIM 是代码补全，需要保持原始代码上下文不被污染
-		// 2. `// Instructions:` 这样的注释对 Python 等语言是语法错误
-		// 3. 模型应该根据纯粹的代码上下文来补全
+		// FIM requests don't add instruction prefix because:
+		// 1. FIM is code completion, needs to keep original code context unpolluted
+		// 2. `// Instructions:` style comments are syntax errors for Python etc.
+		// 3. Model should complete based on pure code context
 
 		const prefix = messages.prefix
 		const suffix = messages.suffix

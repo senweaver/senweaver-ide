@@ -352,7 +352,9 @@ export type BuiltinToolResultType = {
 		sheets?: number,
 		sections?: number,
 		slides?: number,
-		error?: string
+		error?: string,
+		warning?: string,
+		wasJsonRepaired?: boolean,
 	},
 	'pdf_operation': {
 		success: boolean,
