@@ -59,6 +59,8 @@ import { OPT_OUT_KEY } from '../../../../common/storageKeys.js'
 import { IEditorService } from '../../../../../../services/editor/common/editorService.js'
 import { ICustomApiService } from '../../../../common/customApiService.js'
 import { IRemoteCollaborationService } from '../../../remoteCollaborationServiceInterface.js'
+import { ITraceCollectorService } from '../../../../common/traceCollectorService.js'
+import { IAPOService } from '../../../../common/apoService.js'
 
 
 // normally to do this you'd use a useEffect that calls .onDidChangeState(), but useEffect mounts too late and misses initial state changes
@@ -298,6 +300,8 @@ const getReactAccessor = (accessor: ServicesAccessor) => {
 		ICustomApiService: accessor.get(ICustomApiService),
 		IProductService: accessor.get(IProductService),
 		IRemoteCollaborationService: accessor.get(IRemoteCollaborationService),
+		ITraceCollectorService: accessor.get(ITraceCollectorService),
+		IAPOService: accessor.get(IAPOService),
 
 	} as const
 	return reactAccessor

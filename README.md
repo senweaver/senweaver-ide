@@ -5,13 +5,14 @@
 <h1 align="center">SenWeaver IDE</h1>
 
 <p align="center">
-  <strong>智能代码编辑器平台 - AI 驱动的智能开发工具</strong>
+  <strong>开源多智能体协同 AI 编程平台 — 自主在线强化学习驱动</strong>
 </p>
 
 <p align="center">
   <a href="https://ide.senweaver.com">官网</a> •
   <a href="https://github.com/senweaver/senweaver-ide">GitHub</a> •
   <a href="#功能特性">功能特性</a> •
+  <a href="#-强化学习架构">强化学习</a> •
   <a href="#快速开始">快速开始</a> •
   <a href="#贡献指南">贡献指南</a>
 </p>
@@ -19,7 +20,9 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License">
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg" alt="Platform">
-  <img src="https://img.shields.io/badge/version-1.0.5-green.svg" alt="Version">
+  <img src="https://img.shields.io/badge/version-1.0.6-green.svg" alt="Version">
+  <img src="https://img.shields.io/badge/RL-Online%20Learning-orange.svg" alt="Reinforcement Learning">
+  <img src="https://img.shields.io/badge/Multi--Agent-Collaborative-purple.svg" alt="Multi-Agent">
 </p>
 
 ---
@@ -69,11 +72,22 @@
 
 ## 📖 简介
 
-**SenWeaver IDE** 是一款基于 VS Code 深度定制的智能代码编辑器，集成了强大的 AI 辅助编程能力。它不仅继承了 VS Code 的所有优秀特性，还增加了多项创新功能，让开发者能够更高效地编写代码。
+**SenWeaver IDE** 是一款**开源**的、基于 VS Code 深度定制的智能代码编辑器平台。它不仅继承了 VS Code 的全部优秀特性，更创新性地融合了**多智能体协同架构**与**自主在线强化学习（RL）**能力 — 系统会持续从用户交互中学习和优化，使 AI 编程助手越用越智能。
 
-> 🚀 **已开源**：SenWeaver IDE 后端管理系统已正式开源！提供真正可用的企业级基础版本，让企业用户能够完全自主部署和管理 AI 编程助手平台。
+> 🚀 **完全开源**：SenWeaver IDE 客户端与后端管理系统均已正式开源！企业用户可完全自主部署和管理 AI 编程平台。
 >
 > 🔗 后端开源地址：[https://github.com/senweaver/senweaver-ide-admin](https://github.com/senweaver/senweaver-ide-admin)
+
+### 核心亮点
+
+| 亮点 | 说明 |
+|------|------|
+| **🧠 多智能体协同** | 主 Agent + 子 Agent 协作，复杂任务自动分解并行执行 |
+| **📈 自主在线强化学习** | 从用户反馈中实时学习，自动优化 Prompt 策略，越用越精准 |
+| **🔧 40+ 内置工具** | 文件操作、终端、搜索、文档、浏览器、视觉分析一应俱全 |
+| **🌐 远程协作** | WebRTC P2P 直连，App 端远程控制 AI 助手 |
+| **🔒 隐私安全** | 支持本地模型部署（Ollama/LM Studio），数据不出本地 |
+| **🎯 完全开源** | MIT 协议，客户端 + 后端全栈开源，自由定制 |
 
 ## ✨ 功能特性
 
@@ -101,6 +115,32 @@
   - 基于编辑历史预测下一步操作
   - 智能光标位置建议
   - 连续编辑流程优化
+
+### 📈 自主在线强化学习（APO）
+
+SenWeaver IDE 内置了业界领先的**自主在线强化学习**引擎，让 AI 助手在使用过程中持续自我进化。这不是传统的离线微调，而是**端侧实时学习** — 每一次交互都在让系统变得更智能。
+
+- **多维度奖励信号采集**
+  - 自动采集 9 个维度的奖励信号：用户反馈、任务完成度、工具成功率、工具可靠性、工具效率、工具耗时、响应效率、Token 效率、对话效率
+  - 按 chatMode 自适应阈值（Agent 模式 vs 普通模式使用不同评判标准）
+  - 加权聚合计算综合奖励值（`finalReward`），用户反馈权重最高
+
+- **自动 Prompt 优化（APO）**
+  - 基于 Textual Gradient（文本梯度）自动分析 Prompt 缺陷并生成优化建议
+  - Beam Search 候选提示词搜索，保留 Top-K 最优策略
+  - 6 种问题模式自动检测：错误频发、工具失败、Token 浪费、多轮重试、长对话、慢工具
+  - 优化规则自动注入 System Prompt（带 2000 字符预算控制，防止上下文溢出）
+
+- **数据闭环流水线**
+  - **Phase 1 - 数据采集**：TraceCollectorService 异步记录每轮对话的完整轨迹（Span），零性能影响
+  - **Phase 2 - 智能优化**：APOService 分析轨迹数据，生成并管理 Prompt 优化建议
+  - 支持本地分析 + 后端深度优化双模式
+  - 优化建议支持一键应用 / 拒绝 / 回滚，用户始终掌握控制权
+
+- **技术参考**
+  - 参考 agent-lightning 框架的 Textual Gradient & Apply Edit 思路
+  - Beam Search 状态管理参考 APO._update_best_prompt
+  - 所有 RL 数据和状态持久化存储，IDE 重启不丢失
 
 ### 🛡️ 安全小助手
 
@@ -305,6 +345,66 @@ AI 可调用丰富的内置工具完成复杂任务：
 - **设置面板** - 可视化配置所有选项
 - **在线配置同步** - 支持从服务器获取配置更新
 
+## 🧬 强化学习架构
+
+SenWeaver IDE 的在线强化学习系统由两大核心服务构成，形成完整的**数据采集 → 奖励计算 → 分析优化 → Prompt 注入**闭环：
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    SenWeaver IDE 客户端                          │
+│                                                                 │
+│  ┌──────────────┐    Trace 数据    ┌──────────────────────────┐ │
+│  │  用户交互     │ ──────────────> │  TraceCollectorService   │ │
+│  │  (对话/反馈)  │                 │  · Span 记录 (7 种类型)   │ │
+│  └──────────────┘                 │  · 9 维 Reward 计算       │ │
+│         │                         │  · chatMode 自适应阈值    │ │
+│         │ 反馈按钮                  │  · 增量上传 (去重持久化)   │ │
+│         ▼                         └──────────┬───────────────┘ │
+│  ┌──────────────┐                            │                 │
+│  │  SidebarChat │                    Trace + Reward            │
+│  │  (React UI)  │                            │                 │
+│  └──────────────┘                            ▼                 │
+│                               ┌──────────────────────────────┐ │
+│                               │  APOService                  │ │
+│                               │  · 6 种问题模式检测            │ │
+│                               │  · Textual Gradient 生成      │ │
+│                               │  · Beam Search 候选搜索       │ │
+│                               │  · 建议管理 (应用/拒绝/回滚)    │ │
+│                               └──────────┬───────────────────┘ │
+│                                          │                     │
+│                                  优化规则 (≤2000 chars)         │
+│                                          │                     │
+│                                          ▼                     │
+│                               ┌──────────────────────────────┐ │
+│                               │  ConvertToLLMMessageService  │ │
+│                               │  System Prompt + APO Rules   │ │
+│                               └──────────────────────────────┘ │
+│                                                                 │
+│  ┌─────────────────────────────────────────────────────────────┐│
+│  │                    后端服务 (可选)                            ││
+│  │  · /api/traces  — 接收 Trace 数据用于离线训练                 ││
+│  │  · /api/apo/optimize — 深度优化 + Beam Search 更新            ││
+│  │  · /api/apo/textual-gradient — LLM 驱动的 Prompt 批评与编辑  ││
+│  └─────────────────────────────────────────────────────────────┘│
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**奖励信号维度一览：**
+
+| 维度 | 权重 | 说明 |
+|------|------|------|
+| `user_feedback` | 25% | 用户点赞/踩，最直接的信号 |
+| `task_completion` | 18% | 任务是否正常完成、无错误 |
+| `tool_success_rate` | 12% | 工具调用成功率 |
+| `conversation_efficiency` | 11% | 对话轮数越少越好（一次解决） |
+| `tool_call_reliability` | 8% | 工具失败次数惩罚 |
+| `response_efficiency` | 8% | LLM 调用次数越少越好 |
+| `token_efficiency` | 8% | Token 消耗越低越好 |
+| `tool_call_efficiency` | 5% | 工具调用次数是否合理 |
+| `tool_duration_efficiency` | 5% | 工具执行速度 |
+
+> 所有阈值按 chatMode 自适应：Agent 模式允许更多工具调用和 Token 消耗，Normal 模式要求更高效率。
+
 ## 🚀 快速开始
 
 ### 系统要求
@@ -459,6 +559,8 @@ senweaver-ide/
 │   │               │           ├── markdown/              # Markdown 渲染
 │   │               │           └── util/                  # 工具函数
 │   │               ├── common/             # 通用代码（跨平台）
+│   │               │   ├── traceCollectorService.ts       # ⭐ RL 数据采集服务（Phase 1）
+│   │               │   ├── apoService.ts                  # ⭐ 自动 Prompt 优化服务（Phase 2）
 │   │               │   ├── senweaverSettingsService.ts    # 设置服务
 │   │               │   ├── senweaverSettingsTypes.ts      # 设置类型定义
 │   │               │   ├── sendLLMMessageService.ts       # LLM 消息服务

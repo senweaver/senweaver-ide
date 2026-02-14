@@ -738,6 +738,10 @@ async function readDocument(filePath, options = {}) {
  * 2. Edit mode: options.replacements is an array of {find, replace, bold?, italic?} objects
  */
 async function writeWordDocument(filePath, content, options = {}) {
+	// Ensure content is always a valid string — never crash on null/undefined
+	if (content === null || content === undefined) content = '';
+	if (typeof content !== 'string') content = String(content);
+
 	// Try to use docx library for creating Word documents
 	let docx;
 	try {
@@ -749,7 +753,7 @@ async function writeWordDocument(filePath, content, options = {}) {
 	const { Document, Paragraph, TextRun, Packer, HeadingLevel } = docx;
 
 	// Edit mode: read original document, apply replacements
-	if (options.replacements && Array.isArray(options.replacements) && fs.existsSync(filePath)) {
+	if (options.replacements && Array.isArray(options.replacements) && options.replacements.length > 0 && fs.existsSync(filePath)) {
 		// Read original document content using mammoth
 		let originalContent = '';
 		try {
@@ -773,22 +777,26 @@ async function writeWordDocument(filePath, content, options = {}) {
 		content = modifiedContent;
 	}
 
-	// If content is provided directly and file exists, try to preserve structure
-	if (fs.existsSync(filePath) && !options.replacements) {
-		// Read original and apply the content as an update
+	// If content is provided and file exists (non-replacement mode), support append
+	// When new content is shorter than original, it's likely a continuation/append
+	if (fs.existsSync(filePath) && !options.replacements && content && content.trim()) {
 		try {
 			const mammoth = require('mammoth');
 			const result = await mammoth.extractRawText({ path: filePath });
 			const originalContent = result.value;
 
-			// If content seems to be a partial update instruction, try to merge
-			// Otherwise use content as-is (full replacement)
-			if (content.length < originalContent.length * 0.5 && !content.includes('\n\n')) {
-				// Content is short, might be an edit instruction - keep original
+			// Heuristic: if new content doesn't start with a heading and original exists,
+			// treat it as appending to the existing document
+			const isAppend = originalContent && originalContent.trim().length > 0 &&
+				!content.trim().startsWith('# ') &&
+				content.length < originalContent.length;
 
+			if (isAppend) {
+				console.log('[DocumentReader] Appending content to existing document (' + originalContent.length + ' + ' + content.length + ' chars)');
+				content = originalContent + '\n\n' + content;
 			}
 		} catch (e) {
-			// Continue with provided content
+			// Continue with provided content as full replacement
 		}
 	}
 
@@ -876,6 +884,11 @@ async function writeWordDocument(filePath, content, options = {}) {
 		}
 	}
 
+	// Ensure document is never completely empty — docx library requires at least one child
+	if (children.length === 0) {
+		children.push(new Paragraph({ text: '' }));
+	}
+
 	const doc = new Document({
 		sections: [{
 			properties: {},
@@ -884,6 +897,13 @@ async function writeWordDocument(filePath, content, options = {}) {
 	});
 
 	const buffer = await Packer.toBuffer(doc);
+
+	// Ensure parent directories exist
+	const dir = path.dirname(filePath);
+	if (!fs.existsSync(dir)) {
+		fs.mkdirSync(dir, { recursive: true });
+	}
+
 	fs.writeFileSync(filePath, buffer);
 
 	return {
@@ -1147,6 +1167,192 @@ async function addPdfWatermark(inputFile, outputFile, watermarkText, options = {
 }
 
 /**
+ * Attempt to repair truncated JSON (e.g. from LLM output cutoff on long papers).
+ * Uses multiple strategies with increasing aggressiveness.
+ */
+function tryRepairTruncatedJson(input) {
+	if (!input || input.length < 10) return null;
+
+	const firstBrace = input.indexOf('{');
+	if (firstBrace === -1) return null;
+
+	// Strategy 1: Close unclosed braces/brackets after cleaning trailing garbage
+	const result = _repairByClosing(input, firstBrace);
+	if (result) return result;
+
+	// Strategy 2: For severely truncated JSON, try progressively shorter substrings
+	// Find the last complete value boundary (closing quote, bracket, or brace)
+	const json = input.slice(firstBrace);
+	const lastGoodBoundaries = [
+		json.lastIndexOf('}'),
+		json.lastIndexOf(']'),
+		json.lastIndexOf('"'),
+	].filter(i => i > 0).sort((a, b) => b - a);
+
+	for (const boundary of lastGoodBoundaries) {
+		const candidate = json.slice(0, boundary + 1);
+		const repaired = _repairByClosing(candidate, 0);
+		if (repaired) return repaired;
+	}
+
+	return null;
+}
+
+function _repairByClosing(input, startIdx) {
+	let json = input.slice(startIdx);
+
+	let openBraces = 0, openBrackets = 0;
+	let inString = false, escaped = false;
+	for (let i = 0; i < json.length; i++) {
+		const ch = json[i];
+		if (escaped) { escaped = false; continue; }
+		if (ch === '\\') { escaped = true; continue; }
+		if (ch === '"') { inString = !inString; continue; }
+		if (inString) continue;
+		if (ch === '{') openBraces++;
+		else if (ch === '}') openBraces--;
+		else if (ch === '[') openBrackets++;
+		else if (ch === ']') openBrackets--;
+	}
+
+	if (openBraces === 0 && openBrackets === 0) return null;
+	if (openBraces < 0 || openBrackets < 0) return null;
+
+	if (inString) json += '"';
+
+	// Remove trailing incomplete content with multiple patterns
+	const cleanPatterns = [
+		/,\s*"[^"]*"?\s*:?\s*"?[^"]*$/,       // trailing partial key-value
+		/,\s*\{[^}]*$/,                          // trailing incomplete object in array
+		/,\s*\[[^\]]*$/,                          // trailing incomplete array
+		/,\s*"[^"]*$/,                            // trailing incomplete string in array
+	];
+	for (const pattern of cleanPatterns) {
+		const cleaned = json.replace(pattern, '');
+		if (cleaned.length !== json.length && cleaned.length > 5) {
+			json = cleaned;
+			break;
+		}
+	}
+
+	json = json.replace(/,\s*$/, '');
+
+	// Re-count
+	openBraces = 0; openBrackets = 0; inString = false; escaped = false;
+	for (let i = 0; i < json.length; i++) {
+		const ch = json[i];
+		if (escaped) { escaped = false; continue; }
+		if (ch === '\\') { escaped = true; continue; }
+		if (ch === '"') { inString = !inString; continue; }
+		if (inString) continue;
+		if (ch === '{') openBraces++;
+		else if (ch === '}') openBraces--;
+		else if (ch === '[') openBrackets++;
+		else if (ch === ']') openBrackets--;
+	}
+
+	if (inString) json += '"';
+	for (let i = 0; i < openBrackets; i++) json += ']';
+	for (let i = 0; i < openBraces; i++) json += '}';
+
+	try {
+		const parsed = JSON.parse(json);
+		if (parsed && typeof parsed === 'object') {
+			console.log('[DocumentReader] Successfully repaired truncated JSON (' + input.length + ' chars)');
+			return parsed;
+		}
+	} catch { /* repair failed */ }
+
+	return null;
+}
+
+/**
+ * Last-resort: extract readable text content from a string that looks like truncated JSON.
+ * Uses regex to pull out "text", "title", "heading", "subtitle" values and
+ * reconstruct a document-like structure as markdown.
+ * This NEVER fails — always returns some text.
+ */
+function extractTextFromBrokenJson(input) {
+	if (!input || typeof input !== 'string') return '';
+
+	const lines = [];
+
+	// Extract title
+	const titleMatch = input.match(/"title"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+	if (titleMatch) lines.push('# ' + titleMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n'));
+
+	// Extract subtitle
+	const subtitleMatch = input.match(/"subtitle"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+	if (subtitleMatch) lines.push('## ' + subtitleMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n'));
+
+	// Extract all headings (in order of appearance)
+	const headingRegex = /"heading"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+	let headingMatch;
+	const headings = [];
+	while ((headingMatch = headingRegex.exec(input)) !== null) {
+		headings.push(headingMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n'));
+	}
+
+	// Extract all text values (paragraphs)
+	const textRegex = /"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+	let textMatch;
+	const texts = [];
+	while ((textMatch = textRegex.exec(input)) !== null) {
+		const val = textMatch[1].replace(/\\"/g, '"').replace(/\\n/g, '\n').trim();
+		if (val.length > 5) texts.push(val); // skip very short fragments
+	}
+
+	// Interleave headings and text by their position in the original JSON string
+	const headingPositions = [];
+	const hRegex2 = /"heading"\s*:\s*"/g;
+	let hm;
+	while ((hm = hRegex2.exec(input)) !== null) {
+		headingPositions.push(hm.index);
+	}
+
+	const textPositions = [];
+	const tRegex2 = /"text"\s*:\s*"/g;
+	let tm;
+	while ((tm = tRegex2.exec(input)) !== null) {
+		textPositions.push(tm.index);
+	}
+
+	// Build ordered content by position in original string
+	const allItems = [];
+	for (let i = 0; i < headings.length; i++) {
+		allItems.push({ type: 'heading', text: headings[i], pos: headingPositions[i] || 0 });
+	}
+	for (let i = 0; i < texts.length; i++) {
+		allItems.push({ type: 'text', text: texts[i], pos: textPositions[i] || 0 });
+	}
+	allItems.sort((a, b) => a.pos - b.pos);
+
+	for (const item of allItems) {
+		if (item.type === 'heading') {
+			lines.push('\n## ' + item.text);
+		} else {
+			lines.push(item.text);
+		}
+	}
+
+	// If we extracted nothing from structured fields, just strip JSON syntax
+	if (lines.length === 0) {
+		const stripped = input
+			.replace(/[{}\[\]]/g, '')
+			.replace(/"[a-z_]+"\s*:/gi, '')
+			.replace(/"/g, '')
+			.replace(/,\s*$/gm, '')
+			.replace(/true|false|null/g, '')
+			.split('\n')
+			.map(l => l.trim())
+			.filter(l => l.length > 2);
+		return stripped.join('\n');
+	}
+
+	return lines.join('\n');
+}
+
+/**
  * Create professional Word document with advanced formatting
  */
 async function createProfessionalWord(filePath, documentData, options = {}) {
@@ -1157,6 +1363,7 @@ async function createProfessionalWord(filePath, documentData, options = {}) {
 		throw new Error('docx library not installed. Install with: npm install docx');
 	}
 	let normalizedData = documentData;
+	let wasJsonRepaired = false;
 	if (typeof normalizedData === 'string') {
 		const tryParseJsonFromString = (input) => {
 			const original = String(input);
@@ -1164,8 +1371,8 @@ async function createProfessionalWord(filePath, documentData, options = {}) {
 			const fenceMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
 			const baseCandidate = fenceMatch ? fenceMatch[1].trim() : trimmed;
 			const normalizedCandidate = baseCandidate
-				.replace(/[“”„‟]/g, '"')
-				.replace(/[‘’‚‛]/g, "'")
+				.replace(/[""„‟]/g, '"')
+				.replace(/[''‚‛]/g, "'")
 				.replace(/：/g, ':')
 				.replace(/，/g, ',')
 				.replace(/,\s*([}\]])/g, '$1');
@@ -1193,6 +1400,16 @@ async function createProfessionalWord(filePath, documentData, options = {}) {
 			if (firstArr !== -1 && lastArr > firstArr) {
 				parsed = attempt(normalizedCandidate.slice(firstArr, lastArr + 1));
 				if (parsed && typeof parsed === 'object') return parsed;
+			}
+
+			// ================ Truncated JSON repair ================
+			// When LLM output is cut off mid-JSON (e.g. long papers), try to repair
+			if (normalizedCandidate.length > 10 && firstObj !== -1) {
+				const repaired = tryRepairTruncatedJson(normalizedCandidate);
+				if (repaired) {
+					wasJsonRepaired = true;
+					return repaired;
+				}
 			}
 
 			return null;
@@ -1385,40 +1602,51 @@ async function createProfessionalWord(filePath, documentData, options = {}) {
 	};
 
 	const buildParaFromParaData = (para, styleId, alignmentOverride) => {
+		// Null/undefined safety — always return a valid Paragraph
+		if (!para && para !== 0) return new Paragraph({ text: '', style: styleId });
 		if (typeof para === 'string') {
 			return new Paragraph({ text: para, style: styleId, alignment: alignmentOverride });
 		}
+		if (typeof para === 'number') {
+			return new Paragraph({ text: String(para), style: styleId, alignment: alignmentOverride });
+		}
 		const runs = [];
-		if (para && para.text) {
+		if (para.text !== undefined && para.text !== null) {
 			runs.push(new TextRun({
-				text: para.text,
+				text: String(para.text),
 				bold: para.bold,
 				italics: para.italic,
 				size: para.size ? para.size * 2 : undefined
 			}));
 		}
 		return new Paragraph({
-			children: runs,
+			children: runs.length > 0 ? runs : [new TextRun({ text: '' })],
 			style: styleId,
-			alignment: alignmentOverride || (para && para.align === 'center' ? AlignmentType.CENTER :
-				para && para.align === 'right' ? AlignmentType.RIGHT : undefined)
+			alignment: alignmentOverride || (para.align === 'center' ? AlignmentType.CENTER :
+				para.align === 'right' ? AlignmentType.RIGHT : undefined)
 		});
 	};
 
 	const buildTableFromAoa = (aoa) => {
-		const tableRows = aoa.map((row, rowIndex) =>
-			new TableRow({
-				children: row.map(cell =>
-					new TableCell({
-						children: [new Paragraph({
-							text: normalizeText(cell),
-							alignment: AlignmentType.CENTER
-						})],
-						shading: rowIndex === 0 ? { fill: 'DDDDDD' } : undefined
-					})
-				)
-			})
-		);
+		if (!Array.isArray(aoa) || aoa.length === 0) {
+			return new Paragraph({ text: '[Empty table]' });
+		}
+		const tableRows = aoa
+			.filter(row => Array.isArray(row) && row.length > 0)
+			.map((row, rowIndex) =>
+				new TableRow({
+					children: row.map(cell =>
+						new TableCell({
+							children: [new Paragraph({
+								text: normalizeText(cell),
+								alignment: AlignmentType.CENTER
+							})],
+							shading: rowIndex === 0 ? { fill: 'DDDDDD' } : undefined
+						})
+					)
+				})
+			);
+		if (tableRows.length === 0) return new Paragraph({ text: '[Empty table]' });
 		return new Table({ rows: tableRows, width: { size: 100, type: WidthType.PERCENTAGE } });
 	};
 
@@ -1485,7 +1713,15 @@ async function createProfessionalWord(filePath, documentData, options = {}) {
 
 		if (bodyChildren.length === 0) {
 			if (typeof normalizedData === 'string') {
-				const lines = normalizedData.split('\n').map(l => l.trim()).filter(Boolean);
+				// If string looks like truncated JSON, extract text content instead of writing raw JSON
+				const trimmedStr = normalizedData.trim();
+				let contentToUse = normalizedData;
+				if (trimmedStr.startsWith('{') && (trimmedStr.includes('"title"') || trimmedStr.includes('"sections"') || trimmedStr.includes('"paragraphs"'))) {
+					console.warn('[DocumentReader] Detected truncated JSON in academic path, extracting text content');
+					contentToUse = extractTextFromBrokenJson(normalizedData);
+					wasJsonRepaired = true; // mark as repaired (partial content)
+				}
+				const lines = contentToUse.split('\n').map(l => l.trim()).filter(Boolean);
 				for (const line of lines) bodyChildren.push(new Paragraph({ text: line, style: 'SenweaverPaperBody' }));
 			} else if (normalizedData && typeof normalizedData === 'object') {
 				const rawText = (typeof normalizedData.content === 'string' ? normalizedData.content : (typeof normalizedData.text === 'string' ? normalizedData.text : ''));
@@ -1526,13 +1762,19 @@ async function createProfessionalWord(filePath, documentData, options = {}) {
 			children: frontChildren
 		};
 
+		// Ensure document is never completely empty — docx library requires at least one child
+		const allChildren = [...frontChildren, ...bodyChildren];
+		if (allChildren.length === 0) {
+			allChildren.push(new Paragraph({ text: '' }));
+		}
+
 		const sections = [section1];
 		if (isIeee) {
 			const twoCol = { count: 2, space: 720 };
 			section1.properties = { page: a4Page, column: twoCol, columns: twoCol };
-			section1.children = [...frontChildren, ...bodyChildren];
+			section1.children = allChildren;
 		} else {
-			section1.children = [...frontChildren, ...bodyChildren];
+			section1.children = allChildren;
 		}
 
 		const doc = new Document({ styles, sections });
@@ -1548,22 +1790,40 @@ async function createProfessionalWord(filePath, documentData, options = {}) {
 				console.log(`[DocumentReader] ⚠️ IEEE column XML check failed: ${e && e.message ? e.message : String(e)}`);
 			}
 		}
+		// Ensure parent directories exist
+		const dirPath = path.dirname(filePath);
+		if (!fs.existsSync(dirPath)) {
+			fs.mkdirSync(dirPath, { recursive: true });
+		}
 		fs.writeFileSync(filePath, buffer);
 
-		return {
+		const result = {
 			success: true,
 			filePath,
 			fileType: 'word',
 			size: buffer.length,
-			elements: frontChildren.length + bodyChildren.length,
+			elements: allChildren.length,
 			sections: (normalizedData && typeof normalizedData === 'object' && Array.isArray(normalizedData.sections)) ? normalizedData.sections.length : 0
 		};
+		if (wasJsonRepaired) {
+			result.warning = 'Document was created from repaired truncated JSON. Some sections may be incomplete. You can use edit_document to add missing content.';
+			result.wasJsonRepaired = true;
+		}
+		return result;
 	}
 
 	const children = [];
 
 	if (typeof normalizedData === 'string') {
-		const lines = normalizedData.split('\n').map(l => l.trim()).filter(Boolean);
+		// If string looks like truncated JSON, extract text content instead of writing raw JSON
+		const trimmedStr = normalizedData.trim();
+		let contentToUse = normalizedData;
+		if (trimmedStr.startsWith('{') && (trimmedStr.includes('"title"') || trimmedStr.includes('"sections"') || trimmedStr.includes('"paragraphs"'))) {
+			console.warn('[DocumentReader] Detected truncated JSON in non-template path, extracting text content');
+			contentToUse = extractTextFromBrokenJson(normalizedData);
+			wasJsonRepaired = true;
+		}
+		const lines = contentToUse.split('\n').map(l => l.trim()).filter(Boolean);
 		for (const line of lines) {
 			children.push(new Paragraph({ text: line }));
 		}
@@ -1608,32 +1868,34 @@ async function createProfessionalWord(filePath, documentData, options = {}) {
 	}
 
 	// Process sections
-	if (normalizedData?.sections) {
+	if (Array.isArray(normalizedData?.sections)) {
 		for (const section of normalizedData.sections) {
-			if (section.heading) {
+			if (!section) continue; // null safety
+			if (section.heading && typeof section.heading === 'string') {
 				children.push(new Paragraph({
 					text: section.heading,
 					heading: HeadingLevel.HEADING_1
 				}));
 			}
 
-			if (section.paragraphs) {
+			if (Array.isArray(section.paragraphs)) {
 				for (const para of section.paragraphs) {
+					if (!para && para !== 0) continue; // null safety
 					if (typeof para === 'string') {
 						children.push(new Paragraph({ text: para }));
-					} else {
+					} else if (typeof para === 'object') {
 						// Handle formatted paragraph
 						const runs = [];
-						if (para.text) {
+						if (para.text !== undefined && para.text !== null) {
 							runs.push(new TextRun({
-								text: para.text,
+								text: String(para.text),
 								bold: para.bold,
 								italics: para.italic,
 								size: para.size ? para.size * 2 : undefined
 							}));
 						}
 						children.push(new Paragraph({
-							children: runs,
+							children: runs.length > 0 ? runs : [new TextRun({ text: '' })],
 							alignment: para.align === 'center' ? AlignmentType.CENTER :
 								para.align === 'right' ? AlignmentType.RIGHT : AlignmentType.LEFT
 						}));
@@ -1641,25 +1903,29 @@ async function createProfessionalWord(filePath, documentData, options = {}) {
 				}
 			}
 
-			// Handle tables
-			if (section.table) {
-				const tableRows = section.table.map((row, rowIndex) =>
-					new TableRow({
-						children: row.map(cell =>
-							new TableCell({
-								children: [new Paragraph({
-									text: String(cell),
-									alignment: AlignmentType.CENTER
-								})],
-								shading: rowIndex === 0 ? { fill: 'DDDDDD' } : undefined
-							})
-						)
-					})
-				);
-				children.push(new Table({
-					rows: tableRows,
-					width: { size: 100, type: WidthType.PERCENTAGE }
-				}));
+			// Handle tables with null safety
+			if (Array.isArray(section.table) && section.table.length > 0) {
+				const tableRows = section.table
+					.filter(row => Array.isArray(row) && row.length > 0)
+					.map((row, rowIndex) =>
+						new TableRow({
+							children: row.map(cell =>
+								new TableCell({
+									children: [new Paragraph({
+										text: normalizeText(cell),
+										alignment: AlignmentType.CENTER
+									})],
+									shading: rowIndex === 0 ? { fill: 'DDDDDD' } : undefined
+								})
+							)
+						})
+					);
+				if (tableRows.length > 0) {
+					children.push(new Table({
+						rows: tableRows,
+						width: { size: 100, type: WidthType.PERCENTAGE }
+					}));
+				}
 			}
 		}
 	}
@@ -1694,16 +1960,27 @@ async function createProfessionalWord(filePath, documentData, options = {}) {
 	});
 
 	const buffer = await Packer.toBuffer(doc);
+
+	// Ensure parent directories exist
+	const dirPath2 = path.dirname(filePath);
+	if (!fs.existsSync(dirPath2)) {
+		fs.mkdirSync(dirPath2, { recursive: true });
+	}
 	fs.writeFileSync(filePath, buffer);
 
-	return {
+	const result = {
 		success: true,
 		filePath,
 		fileType: 'word',
 		size: buffer.length,
 		elements: children.length,
-		sections: normalizedData?.sections?.length || 0
+		sections: Array.isArray(normalizedData?.sections) ? normalizedData.sections.length : 0
 	};
+	if (wasJsonRepaired) {
+		result.warning = 'Document was created from repaired truncated JSON. Some sections may be incomplete. You can use edit_document to add missing content.';
+		result.wasJsonRepaired = true;
+	}
+	return result;
 }
 
 /**
@@ -3197,7 +3474,8 @@ function createServer() {
 				// Route to appropriate handler based on action
 				if (action === '/write' || action === '/edit') {
 					// Write/Edit document
-					const { file_path, content, options } = data;
+					const { file_path, options } = data;
+					let content = data.content;
 
 					if (!file_path) {
 						res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -3205,12 +3483,15 @@ function createServer() {
 						return;
 					}
 
-					if (content === undefined) {
-						res.writeHead(400, { 'Content-Type': 'application/json' });
-						res.end(JSON.stringify({ error: 'content is required' }));
-						return;
+					if (content === undefined || content === null) {
+						// For replacement mode, empty content is OK — we'll read the original
+						if (!options || !options.replacements) {
+							res.writeHead(400, { 'Content-Type': 'application/json' });
+							res.end(JSON.stringify({ error: 'content is required' }));
+							return;
+						}
+						content = '';
 					}
-
 
 					const result = await writeDocument(file_path, content, options || {});
 
